@@ -1,0 +1,12 @@
+namespace Poc.Api.Authorization;
+
+public static class Policies
+{
+    /// <summary>Delegated scope the SPA must present on every call (api://&lt;api-client-id&gt;/access_as_user).</summary>
+    public const string ApiScope = "access_as_user";
+
+    /// <summary>App role assigned in Entra ID that unlocks directory-wide lookups.</summary>
+    public const string ApplicationAdminRole = "ApplicationAdmin";
+
+    public const string ApplicationAdmin = "ApplicationAdmin";
+}

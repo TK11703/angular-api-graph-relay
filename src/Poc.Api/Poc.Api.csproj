@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>83faeefc-4f8c-4cf6-a03a-75269c57597f</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Identity.Web" Version="4.15.0" />
+    <PackageReference Include="Microsoft.Identity.Web.GraphServiceClient" Version="4.15.0" />
+  </ItemGroup>
+
+</Project>
