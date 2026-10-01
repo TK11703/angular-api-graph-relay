@@ -6,15 +6,21 @@ using Poc.Api.Infrastructure;
 namespace Poc.Api.Models;
 
 /// <summary>Query parameters for the directory-wide user search. Validated before the endpoint runs.</summary>
-public sealed class UserSearchRequest
+public sealed class UserSearchRequest : IValidatableObject
 {
     /// <summary>Free-text fragment matched against displayName, mail and userPrincipalName.</summary>
     [FromQuery(Name = "search")]
-    [Required(AllowEmptyStrings = false, ErrorMessage = "A search term is required.")]
     [StringLength(64, MinimumLength = 2, ErrorMessage = "Search must be between 2 and 64 characters.")]
     // Deliberately restrictive: the value is interpolated into a Graph $search expression.
     [RegularExpression(@"^[A-Za-z0-9 ._@'-]+$", ErrorMessage = "Search may only contain letters, digits, spaces and . _ @ ' -")]
-    public string Search { get; init; } = string.Empty;
+    public string? Search { get; init; }
+
+    /// <summary>Department prefix (case-insensitive), applied as a Graph $filter.</summary>
+    [FromQuery(Name = "department")]
+    [StringLength(64, MinimumLength = 2, ErrorMessage = "Department must be between 2 and 64 characters.")]
+    // Interpolated into an OData string literal; quotes are escaped as well.
+    [RegularExpression(@"^[A-Za-z0-9 ._&/'-]+$", ErrorMessage = "Department may only contain letters, digits, spaces and . _ & / ' -")]
+    public string? Department { get; init; }
 
     /// <summary>Maximum number of users to return.</summary>
     [FromQuery(Name = "top")]
@@ -30,6 +36,15 @@ public sealed class UserSearchRequest
     [StringLength(512)]
     [SelectableUserProperties]
     public string? Select { get; init; }
+
+    public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
+    {
+        if (string.IsNullOrWhiteSpace(Search) && string.IsNullOrWhiteSpace(Department))
+        {
+            yield return new ValidationResult(
+                "Provide a search term, a department, or both.", [nameof(Search), nameof(Department)]);
+        }
+    }
 }
 
 /// <summary>Route parameter for a single-user lookup.</summary>

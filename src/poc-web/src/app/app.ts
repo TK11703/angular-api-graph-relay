@@ -138,12 +138,25 @@ import { AuthService } from './auth/auth.service';
                 [value]="term()"
                 (input)="term.set($any($event.target).value)"
                 (keyup.enter)="search()" />
-              <button (click)="search()" [disabled]="busy() || !selected().length">Search</button>
+              <input
+                type="search"
+                class="department"
+                placeholder="Department starts with&hellip;"
+                [value]="department()"
+                (input)="department.set($any($event.target).value)"
+                (keyup.enter)="search()" />
+              <button
+                (click)="search()"
+                [disabled]="busy() || !selected().length || (!term().trim() && !department().trim())">
+                Search
+              </button>
             </div>
 
             <p class="hint">
               Your term is matched against <code>{{ searchedFields() }}</code>. Microsoft Graph
               <code>$search</code> matches whole words and the start of a word &mdash; not arbitrary substrings.
+              Department is applied separately as <code>$filter=startsWith(department, &hellip;)</code>; fill in
+              either box or both.
             </p>
 
             @if (catalog(); as cat) {
@@ -300,6 +313,7 @@ import { AuthService } from './auth/auth.service';
       border-radius: .25rem;
       min-width: 22rem;
     }
+    input[type='search'].department { min-width: 14rem; }
     fieldset { border: 1px solid #ececf0; border-radius: .25rem; padding: .5rem 1rem 1rem; margin: 1rem 0; }
     legend { color: #5c5c66; font-size: .85rem; padding: 0 .35rem; }
     .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: .4rem 1.25rem; }
@@ -353,6 +367,7 @@ export class App {
   /** Which row is expanded, so the action can toggle and the panel survives a re-render. */
   protected readonly detailId = signal<string | null>(null);
   protected readonly term = signal('');
+  protected readonly department = signal('');
   protected readonly busy = signal(false);
   protected readonly error = signal<string | null>(null);
 
@@ -411,7 +426,7 @@ export class App {
   protected search(): void {
     this.start();
     this.closeDetails();
-    this.api.searchUsers(this.term().trim(), this.selected()).subscribe({
+    this.api.searchUsers(this.term().trim(), this.department().trim(), this.selected()).subscribe({
       next: (response) => this.finish(() => this.results.set(response)),
       error: (err) => this.fail(err),
     });

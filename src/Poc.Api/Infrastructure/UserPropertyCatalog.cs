@@ -74,6 +74,10 @@ internal static class UserPropertyCatalog
     internal static string BuildSearchExpression(string term) =>
         string.Join(" OR ", SearchedNames.Select(name => $"\"{name}:{term}\""));
 
+    // department isn't covered by $search, so it goes through $filter (an advanced query; needs ConsistencyLevel).
+    internal static string BuildDepartmentFilter(string department) =>
+        $"startsWith(department,'{department.Trim().Replace("'", "''")}')";
+
     internal static UserRow Project(User user, IReadOnlyList<UserPropertyDescriptor> fields) =>
         new(user.Id, fields.ToDictionary(f => f.Name, f => ByName[f.Name].Read(user)));
 

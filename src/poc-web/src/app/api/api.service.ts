@@ -32,8 +32,14 @@ export class ApiService {
     return this.http.get<UserPropertyCatalog>(`${this.baseUrl}/users/properties`);
   }
 
-  searchUsers(search: string, select: string[], top = 10): Observable<UserSearchResponse> {
-    let params = new HttpParams().set('search', search).set('top', top);
+  searchUsers(search: string, department: string, select: string[], top = 10): Observable<UserSearchResponse> {
+    let params = new HttpParams().set('top', top);
+    if (search) {
+      params = params.set('search', search);
+    }
+    if (department) {
+      params = params.set('department', department);
+    }
     if (select.length) {
       params = params.set('select', select.join(','));
     }

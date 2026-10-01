@@ -28,7 +28,14 @@ public static class UserEndpoints
             {
                 // Both halves are safe to interpolate: the term is regex-constrained by validation and
                 // the field names come from the catalog, never from the caller.
-                r.QueryParameters.Search = UserPropertyCatalog.BuildSearchExpression(request.Search);
+                if (!string.IsNullOrWhiteSpace(request.Search))
+                {
+                    r.QueryParameters.Search = UserPropertyCatalog.BuildSearchExpression(request.Search);
+                }
+                if (!string.IsNullOrWhiteSpace(request.Department))
+                {
+                    r.QueryParameters.Filter = UserPropertyCatalog.BuildDepartmentFilter(request.Department);
+                }
                 r.QueryParameters.Select = UserPropertyCatalog.GraphSelect(fields);
                 r.QueryParameters.Orderby = ["displayName"];
                 r.QueryParameters.Top = request.Top;
