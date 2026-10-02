@@ -13,6 +13,13 @@ param entraTenantId string = tenant().tenantId
 @description('Client id of the PoC API app registration.')
 param apiClientId string
 
+@description('OnBehalfOf: Graph is called as the signed-in user (MI is the app\'s federated credential). ManagedIdentity: Graph is called app-only as the API\'s managed identity.')
+@allowed([
+  'OnBehalfOf'
+  'ManagedIdentity'
+])
+param graphAuthMode string = 'OnBehalfOf'
+
 param authorityHost string = environment().authentication.loginEndpoint
 
 param graphBaseUrl string = environment().name == 'AzureUSGovernment'
@@ -134,6 +141,18 @@ resource containerEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
 var apiUrl = 'https://${apiAppName}.${containerEnv.properties.defaultDomain}'
 var spaUrl = 'https://${spaAppName}.${containerEnv.properties.defaultDomain}'
 
+var graphAuthEnv = graphAuthMode == 'ManagedIdentity'
+  ? [
+      { name: 'GraphAccess__Mode', value: 'ManagedIdentity' }
+      { name: 'GraphAccess__ManagedIdentityClientId', value: apiIdentity.properties.clientId }
+    ]
+  : [
+      { name: 'GraphAccess__Mode', value: 'OnBehalfOf' }
+      { name: 'AzureAd__ClientCredentials__0__SourceType', value: 'SignedAssertionFromManagedIdentity' }
+      { name: 'AzureAd__ClientCredentials__0__ManagedIdentityClientId', value: apiIdentity.properties.clientId }
+      { name: 'AzureAd__ClientCredentials__0__TokenExchangeUrl', value: tokenExchangeAudience }
+    ]
+
 module apiApp 'modules/container-app.bicep' = if (!empty(apiImage)) {
   name: 'container-app-api'
   params: {
@@ -148,16 +167,13 @@ module apiApp 'modules/container-app.bicep' = if (!empty(apiImage)) {
     memory: containerMemory
     minReplicas: minReplicas
     maxReplicas: maxReplicas
-    env: [
+    env: concat([
       { name: 'AzureAd__Instance', value: authorityHost }
       { name: 'AzureAd__TenantId', value: entraTenantId }
       { name: 'AzureAd__ClientId', value: apiClientId }
-      { name: 'AzureAd__ClientCredentials__0__SourceType', value: 'SignedAssertionFromManagedIdentity' }
-      { name: 'AzureAd__ClientCredentials__0__ManagedIdentityClientId', value: apiIdentity.properties.clientId }
-      { name: 'AzureAd__ClientCredentials__0__TokenExchangeUrl', value: tokenExchangeAudience }
       { name: 'MicrosoftGraph__BaseUrl', value: graphBaseUrl }
       { name: 'Cors__AllowedOrigins__0', value: spaUrl }
-    ]
+    ], graphAuthEnv)
   }
   dependsOn: [
     apiAcrPull
@@ -191,3 +207,4 @@ output spaUrl string = spaUrl
 output apiIdentityResourceId string = apiIdentity.id
 output apiIdentityClientId string = apiIdentity.properties.clientId
 output apiIdentityPrincipalId string = apiIdentity.properties.principalId
+output graphAuthMode string = graphAuthMode

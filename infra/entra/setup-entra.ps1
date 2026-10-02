@@ -14,6 +14,9 @@
         * SPA redirect URI for the Angular dev server
         * permission to call the API's access_as_user scope (pre-authorized, so no second consent prompt)
 
+    For the managed-identity (non-OBO) deployment, -GrantManagedIdentityGraphAccess instead grants the
+    API's managed identity Microsoft Graph application permissions, so it calls Graph as itself.
+
     The script is idempotent: re-running it reuses existing registrations and their
     scope / app-role identifiers.
 
@@ -26,6 +29,9 @@
 
 .EXAMPLE
     ./setup-entra.ps1 -ConfigureFederatedCredential -ManagedIdentityResourceId /subscriptions/.../userAssignedIdentities/poc-api
+
+.EXAMPLE
+    ./setup-entra.ps1 -GrantManagedIdentityGraphAccess -ManagedIdentityResourceId /subscriptions/.../userAssignedIdentities/poc-api
 #>
 [CmdletBinding()]
 param(
@@ -55,6 +61,13 @@ param(
     [string] $FederatedCredentialName = 'poc-api-managed-identity',
     [string] $FederatedAudience,
 
+    # Managed-identity (non-OBO) deployment: grants the identity above Graph application permissions
+    # (app-only, tenant-wide). Requires Privileged Role Administrator or Global Administrator.
+    [switch] $GrantManagedIdentityGraphAccess,
+    [string[]] $ManagedIdentityGraphAppRoles = @('User.Read.All', 'GroupMember.Read.All', 'User.ReadWrite.All'),
+    # Graph only lets app-only callers edit some properties (e.g. mobilePhone) with a directory role.
+    [switch] $AssignUserAdministratorRoleToManagedIdentity,
+
     # Writes the resulting ids into src/poc-web/.../environment.ts and the API user-secrets.
     [switch] $ApplyLocalConfig
 )
@@ -66,6 +79,8 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
 
 # The Graph first-party app id is identical in every cloud; only the endpoints differ.
 $GraphAppId = '00000003-0000-0000-c000-000000000000'
+# Built-in role template ids are also identical in every cloud.
+$UserAdministratorRoleId = 'fe930be7-5e62-47db-91af-98c3a49a38b1'
 $GraphDelegatedPermissions = @('openid', 'profile', 'offline_access', 'User.Read', 'User.Read.All', 'User.ReadWrite.All', 'GroupMember.Read.All')
 
 # Workload identity federation uses a different token-exchange audience per cloud.
@@ -331,9 +346,9 @@ if ($AssignAdminRoleToCurrentUser) {
     }
 }
 
-# ------------------------------------------------------ federated credential --
-if ($ConfigureFederatedCredential) {
-    Write-Host '==> Configuring federated identity credential' -ForegroundColor Cyan
+# ------------------------------------------------------ managed identity -----
+if ($ConfigureFederatedCredential -or $GrantManagedIdentityGraphAccess -or $AssignUserAdministratorRoleToManagedIdentity) {
+    Write-Host '==> Resolving managed identity' -ForegroundColor Cyan
 
     if ($ManagedIdentityResourceId) {
         $identity = Invoke-AzJson -Arguments @('identity', 'show', '--ids', $ManagedIdentityResourceId)
@@ -345,6 +360,11 @@ if ($ConfigureFederatedCredential) {
     if (-not $ManagedIdentityPrincipalId) {
         throw 'Pass -ManagedIdentityResourceId, or -ManagedIdentityPrincipalId for a system-assigned identity.'
     }
+}
+
+# ------------------------------------------------------ federated credential --
+if ($ConfigureFederatedCredential) {
+    Write-Host '==> Configuring federated identity credential' -ForegroundColor Cyan
 
     if (-not $FederatedAudience) {
         $FederatedAudience = $TokenExchangeAudiences[$cloud.name]
@@ -384,6 +404,53 @@ if ($ConfigureFederatedCredential) {
     Write-Host "  audience : $FederatedAudience"
 }
 
+# ------------------------------------------- managed identity Graph access ---
+if ($GrantManagedIdentityGraphAccess) {
+    Write-Host '==> Granting Microsoft Graph application permissions to the managed identity' -ForegroundColor Cyan
+
+    $graphAppRoleIds = @{}
+    foreach ($role in $graphSp.appRoles) { $graphAppRoleIds[$role.value] = $role.id }
+
+    $existingGrants = (Get-PropertyOrDefault (Invoke-GraphRequest -Method GET -Path "servicePrincipals/$ManagedIdentityPrincipalId/appRoleAssignments") 'value')
+
+    foreach ($permission in $ManagedIdentityGraphAppRoles) {
+        if (-not $graphAppRoleIds.ContainsKey($permission)) { throw "Microsoft Graph does not expose application permission '$permission'." }
+        $appRoleId = $graphAppRoleIds[$permission]
+
+        if ($existingGrants | Where-Object { $_.appRoleId -eq $appRoleId -and $_.resourceId -eq $graphSp.id }) {
+            Write-Host "  $permission already granted"
+            continue
+        }
+
+        Invoke-GraphRequest -Method POST -Path "servicePrincipals/$ManagedIdentityPrincipalId/appRoleAssignments" -Body @{
+            principalId = $ManagedIdentityPrincipalId
+            resourceId  = $graphSp.id
+            appRoleId   = $appRoleId
+        }
+        Write-Host "  granted $permission"
+    }
+    Write-Host '  new grants reach the identity''s cached tokens within ~24h; restart the API revision to pick them up sooner'
+}
+
+if ($AssignUserAdministratorRoleToManagedIdentity) {
+    Write-Host '==> Assigning the User Administrator directory role to the managed identity' -ForegroundColor Cyan
+
+    $filter = [uri]::EscapeDataString("principalId eq '$ManagedIdentityPrincipalId' and roleDefinitionId eq '$UserAdministratorRoleId'")
+    $existingRole = Invoke-GraphRequest -Method GET -Path "roleManagement/directory/roleAssignments?`$filter=$filter"
+
+    if (@(Get-PropertyOrDefault $existingRole 'value').Count -gt 0) {
+        Write-Host '  already assigned'
+    }
+    else {
+        Invoke-GraphRequest -Method POST -Path 'roleManagement/directory/roleAssignments' -Body @{
+            principalId      = $ManagedIdentityPrincipalId
+            roleDefinitionId = $UserAdministratorRoleId
+            directoryScopeId = '/'
+        }
+        Write-Host '  assigned tenant-wide'
+    }
+}
+
 # ---------------------------------------------------------------- output -----
 $result = [ordered]@{
     tenantId       = $tenantId
@@ -406,6 +473,11 @@ if ($ConfigureFederatedCredential) {
     $result.federatedCredential = $FederatedCredentialName
     $result.managedIdentityPrincipalId = $ManagedIdentityPrincipalId
     if ($ManagedIdentityClientId) { $result.managedIdentityClientId = $ManagedIdentityClientId }
+}
+
+if ($GrantManagedIdentityGraphAccess) {
+    $result.managedIdentityPrincipalId = $ManagedIdentityPrincipalId
+    $result.managedIdentityGraphAppRoles = $ManagedIdentityGraphAppRoles -join ' '
 }
 
 $outputFile = Join-Path $PSScriptRoot 'entra-output.json'

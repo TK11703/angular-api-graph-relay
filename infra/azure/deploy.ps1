@@ -11,8 +11,15 @@
     Run infra/entra/setup-entra.ps1 in the same cloud and tenant first; this script reads
     infra/entra/entra-output.json. The cloud is whatever `az cloud set` points at.
 
+    -GraphAuthMode picks how the API reaches Microsoft Graph:
+      OnBehalfOf      (default) as the signed-in user; the API's managed identity is the app's federated credential.
+      ManagedIdentity app-only as the API's managed identity, which needs Graph application permissions.
+
 .EXAMPLE
     ./deploy.ps1
+
+.EXAMPLE
+    ./deploy.ps1 -GraphAuthMode ManagedIdentity -ResourceGroup rg-aagr-mi -NamePrefix aagrmi
 
 .EXAMPLE
     az cloud set --name AzureUSGovernment; az login
@@ -28,6 +35,8 @@ param(
     [int] $MaxReplicas = 1,
     [ValidateSet('Basic', 'Standard', 'Premium')]
     [string] $AcrSku = 'Basic',
+    [ValidateSet('OnBehalfOf', 'ManagedIdentity')]
+    [string] $GraphAuthMode = 'OnBehalfOf',
     [string] $EntraOutputFile = (Join-Path $PSScriptRoot '../entra/entra-output.json')
 )
 
@@ -141,6 +150,7 @@ function Deploy-Infrastructure {
         "location=$Location"
         "entraTenantId=$($entra.tenantId)"
         "apiClientId=$($entra.apiClientId)"
+        "graphAuthMode=$GraphAuthMode"
         "authorityHost=$($entra.authorityHost)"
         "graphBaseUrl=$($entra.graphBaseUrl)"
         "containerCpu=$ContainerCpu"
@@ -248,7 +258,17 @@ Write-Host ''
 Write-Host '==> Done' -ForegroundColor Green
 Write-Host "  SPA : $($infra.spaUrl)"
 Write-Host "  API : $($infra.apiUrl)/api"
+Write-Host "  Graph auth : $GraphAuthMode"
 Write-Host ''
+if ($GraphAuthMode -eq 'ManagedIdentity') {
+    Write-Host 'If not done yet for this deployment, grant the managed identity Graph application permissions and register the SPA URL (needs Privileged Role Administrator / Global Administrator):' -ForegroundColor Yellow
+    Write-Host "  cd infra/entra"
+    Write-Host "  ./setup-entra.ps1 -ApplyLocalConfig -GrantManagedIdentityGraphAccess ``"
+    Write-Host "      -ManagedIdentityResourceId $($infra.apiIdentityResourceId) ``"
+    Write-Host "      -AdditionalSpaRedirectUris $($infra.spaUrl)"
+    Write-Host '  (add -AssignUserAdministratorRoleToManagedIdentity if edits must cover phone numbers or other privileged properties)'
+    return
+}
 Write-Host 'If not done yet for this deployment, trust the managed identity and register the SPA URL (needs Entra admin rights):' -ForegroundColor Yellow
 Write-Host "  cd infra/entra"
 Write-Host "  ./setup-entra.ps1 -ApplyLocalConfig -ConfigureFederatedCredential ``"

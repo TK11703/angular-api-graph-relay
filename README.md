@@ -242,6 +242,36 @@ az cloud set --name AzureUSGovernment; az login
 ./deploy.ps1 -Location usgovvirginia -ResourceGroup rg-aagr-gov
 ```
 
+### Managed-identity deployment (no OBO)
+
+The same templates deploy a second variant where the API calls Graph **app-only as its own managed
+identity** instead of on-behalf-of the user. Use a separate resource group / prefix so both can coexist:
+
+```powershell
+./deploy.ps1 -GraphAuthMode ManagedIdentity -ResourceGroup rg-aagr-mi -NamePrefix aagrmi
+```
+
+The API then gets `GraphAccess__Mode=ManagedIdentity` and the identity's client id instead of the
+federated-credential settings. Afterwards run the `setup-entra.ps1` command the script prints
+(`-GrantManagedIdentityGraphAccess`); it grants the identity's service principal these Graph
+**application** permissions:
+
+| Permission | Used by |
+| --- | --- |
+| `User.Read.All` | `/api/me`, `/api/users` search and lookup |
+| `GroupMember.Read.All` | `/api/me/groups`, `/api/users/{id}/groups` |
+| `User.ReadWrite.All` | `PATCH /api/users/{id}` |
+
+Trim the list with `-ManagedIdentityGraphAppRoles` (e.g. drop `User.ReadWrite.All` for a read-only
+deployment). Add `-AssignUserAdministratorRoleToManagedIdentity` if edits must reach properties Graph
+protects behind a directory role (such as `mobilePhone`). Granting application permissions needs
+Privileged Role Administrator or Global Administrator.
+
+In this mode Graph no longer evaluates the caller's own permissions: any signed-in user with
+`access_as_user` reads the directory with the identity's rights, and the API's `CanEditUsers` policy
+(`ApplicationAdmin` role) is the only gate on writes. The `ManagedIdentity` mode only works where a
+managed identity is available, so local development stays on OBO.
+
 - The first request after the apps scale to zero takes several seconds while a replica starts.
 - Container Apps occasionally rejects new environments in a busy region
   (`ManagedEnvironmentCapacityHeavyUsageError`). The script stops on it; redeploy to another region
@@ -261,6 +291,8 @@ az cloud set --name AzureUSGovernment; az login
 | `AzureAd:ClientCredentials` | how the API proves its identity — see below |
 | `MicrosoftGraph:BaseUrl` | Graph endpoint for the cloud |
 | `MicrosoftGraph:Scopes` | delegated scopes requested during the OBO exchange |
+| `GraphAccess:Mode` | `OnBehalfOf` (default) or `ManagedIdentity` (app-only Graph calls) |
+| `GraphAccess:ManagedIdentityClientId` | user-assigned identity for `ManagedIdentity` mode; omit for system-assigned |
 | `Cors:AllowedOrigins` | origins allowed to call the API |
 
 The API accepts v2 access tokens whose audience is either the API client id or

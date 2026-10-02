@@ -73,6 +73,7 @@ public static class UserEndpoints
             CancellationToken ct) =>
         {
             // Write scope is requested only for this call, so read-only OBO tokens stay read-only.
+            // Ignored in managed-identity mode, where the identity's app roles apply instead.
             await graph.Users[target.Id].PatchAsync(
                 update.ToGraphPatch(), r => r.Options.WithScopes(GraphScopes.UserWrite), ct);
 
