@@ -32,6 +32,8 @@ param(
     [string] $ApiAppName = 'PoC API',
     [string] $SpaAppName = 'PoC SPA',
     [string] $SpaRedirectUri = 'http://localhost:4200',
+    # Deployed SPA origins, e.g. the Static Web Apps URL. Existing redirect URIs are kept.
+    [string[]] $AdditionalSpaRedirectUris = @(),
     [string] $ApiBaseUrl = 'https://localhost:7182/api',
 
     # Sovereign-cloud endpoints. Left empty, both are read from the CLI's active cloud
@@ -284,13 +286,17 @@ Invoke-GraphRequest -Method PATCH -Path "applications/$apiObjectId" -Body @{
 }
 Write-Host '  SPA pre-authorized for access_as_user'
 
+$existingRedirectUris = @(Get-PropertyOrDefault (Get-PropertyOrDefault $spaApp 'spa') 'redirectUris')
+$spaRedirectUris = @(@($SpaRedirectUri) + $AdditionalSpaRedirectUris + $existingRedirectUris |
+    Where-Object { $_ } | ForEach-Object { $_.TrimEnd('/') } | Select-Object -Unique)
+
 Invoke-GraphRequest -Method PATCH -Path "applications/$spaObjectId" -Body @{
-    spa                    = @{ redirectUris = @($SpaRedirectUri) }
+    spa                    = @{ redirectUris = $spaRedirectUris }
     requiredResourceAccess = @(
         @{ resourceAppId = $apiAppId; resourceAccess = @(@{ id = $apiScopeId; type = 'Scope' }) }
     )
 }
-Write-Host "  redirect uri $SpaRedirectUri and API permission configured"
+Write-Host "  redirect uris $($spaRedirectUris -join ', ') and API permission configured"
 
 # ----------------------------------------------------------- admin consent ---
 Write-Host '==> Granting admin consent' -ForegroundColor Cyan

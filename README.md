@@ -22,6 +22,7 @@ flowchart LR
 | [src/poc-web](src/poc-web) | Angular 21 SPA, `@azure/msal-browser`, no test framework |
 | [src/Poc.Api](src/Poc.Api) | .NET 10 minimal API, `Microsoft.Identity.Web`, built-in endpoint validation |
 | [infra/entra](infra/entra) | Azure CLI scripts that create the two app registrations |
+| [infra/azure](infra/azure) | Bicep and a deploy script that host both apps on Azure Container Apps |
 
 The running app carries the same explanation on its **About** tab, which is reachable before you sign in.
 
@@ -197,6 +198,48 @@ npm start
 Open `http://localhost:4200`. The **About** tab explains the flow without signing in. Sign in, then
 choose **Request my Entra info** on the **My Information** tab. If your account holds the
 `ApplicationAdmin` role, an **Other Users** tab appears alongside it.
+
+## 4. Deploy to Azure
+
+Both apps run on Azure Container Apps (consumption plan, scale to zero), so an idle deployment costs
+only the Basic container registry. Defined in [infra/azure/main.bicep](infra/azure/main.bicep).
+
+| Resource | Notes |
+| --- | --- |
+| `aagr-api` container app | .NET API, 0.25 vCPU / 0.5 GiB, 0&ndash;1 replicas |
+| `aagr-spa` container app | nginx serving the built SPA, same sizing |
+| User-assigned managed identities | one per app; both pull from the registry (`AcrPull`), the API's also replaces the client secret for OBO |
+| Container registry (Basic) | images are built in the registry with `az acr build`, no local Docker needed |
+| Log Analytics workspace | container logs, 30-day retention |
+
+Run step 1 first in the same cloud and tenant, then:
+
+```powershell
+cd infra/azure
+./deploy.ps1                                  # defaults: rg-aagr, eastus2
+```
+
+The script deploys the infrastructure, builds both images, builds the SPA against the deployed URLs
+and deploys again with the images, printing per-resource status as it goes. On the **first** deploy,
+run the `setup-entra.ps1` command it prints at the end: it registers the API's managed identity as a
+federated credential and adds the SPA URL as a redirect URI. Re-running `deploy.ps1` later just ships
+new images.
+
+Sizing, region and replica count are parameters (`-Location`, `-ResourceGroup`, `-ContainerCpu`,
+`-ContainerMemory`, `-MaxReplicas`, `-AcrSku`). For Azure Government, switch the CLI cloud and
+re-run both steps there; the authority, Graph endpoint and token-exchange audience follow the cloud:
+
+```powershell
+az cloud set --name AzureUSGovernment; az login
+./deploy.ps1 -Location usgovvirginia -ResourceGroup rg-aagr-gov
+```
+
+- The first request after the apps scale to zero takes several seconds while a replica starts.
+- Container Apps occasionally rejects new environments in a busy region
+  (`ManagedEnvironmentCapacityHeavyUsageError`). The script stops on it; redeploy to another region
+  with a new resource group.
+- Re-running `setup-entra.ps1` resets the API client secret; keep `-ApplyLocalConfig` so local
+  development picks up the new one.
 
 ## Configuration reference
 
