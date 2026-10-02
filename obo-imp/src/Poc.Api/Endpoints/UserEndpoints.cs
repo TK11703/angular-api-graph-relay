@@ -79,7 +79,7 @@ public static class UserEndpoints
             var user = await graph.Users[target.Id].GetAsync(
                 r => r.QueryParameters.Select = GraphMappings.ProfileSelect, ct);
 
-            return user is null ? Results.NotFound() : Results.Ok(user.ToProfile());
+            return user is null ? Results.NotFound() : Results.Ok(user.ToProfile().WithUpdate(update));
         })
         .RequireAuthorization(Policies.CanEditUsers)
         .WithName("UpdateUser");

@@ -39,6 +39,20 @@ internal static class GraphMappings
         return user;
     }
 
+    // Graph reads right after a write can come from a replica that has not caught up, so the written values win.
+    internal static UserProfile WithUpdate(this UserProfile profile, UserUpdateRequest update) => profile with
+    {
+        DisplayName = update.DisplayName.Trim(),
+        GivenName = Normalize(update.GivenName),
+        Surname = Normalize(update.Surname),
+        JobTitle = Normalize(update.JobTitle),
+        Department = Normalize(update.Department),
+        OfficeLocation = Normalize(update.OfficeLocation),
+        MobilePhone = Normalize(update.MobilePhone),
+    };
+
+    private static string? Normalize(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     // The Graph serializer skips null properties, so clearing a value has to go through AdditionalData.
     private static void Set(User user, string name, string? value, Action<string> assign)
     {
