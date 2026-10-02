@@ -22,6 +22,17 @@ export interface UserProfile {
   preferredLanguage: string | null;
 }
 
+/** Body of PATCH /api/users/:id. A blank value clears the property in the directory. */
+export interface UserUpdate {
+  displayName: string;
+  givenName: string;
+  surname: string;
+  jobTitle: string;
+  department: string;
+  officeLocation: string;
+  mobilePhone: string;
+}
+
 export interface UserPropertyDescriptor {
   name: string;
   label: string;

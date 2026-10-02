@@ -55,7 +55,7 @@ sequenceDiagram
     U->>SPA: Click Search on the Other Users tab
     SPA->>SPA: authInterceptor adds the Authorization Bearer header
     SPA->>API: GET /api/users?search=ahsoka&select=displayName,department
-    API->>API: Validate signature, issuer, audience<br/>require scp access_as_user AND role ApplicationAdmin
+    API->>API: Validate signature, issuer, audience<br/>require scp access_as_user
     API->>EID: On-Behalf-Of request<br/>user assertion = inbound token<br/>client credential = secret or managed identity<br/>scopes User.Read.All, GroupMember.Read.All
     EID-->>API: Graph token carrying the SAME user identity
     API->>G: GET /users with $search, $select, $orderby<br/>header ConsistencyLevel eventual
@@ -80,7 +80,7 @@ flowchart LR
         SCOPE["Exposed scope<br/>access_as_user"]
         ROLE["App role<br/>ApplicationAdmin"]
         GRAPHSP["Microsoft Graph service principal<br/>00000003-0000-0000-c000-000000000000"]
-        PERMS["Delegated permissions, admin consented<br/>User.Read<br/>User.Read.All<br/>GroupMember.Read.All"]
+        PERMS["Delegated permissions, admin consented<br/>User.Read<br/>User.Read.All<br/>User.ReadWrite.All<br/>GroupMember.Read.All"]
     end
 
     APIREG --> SCOPE
@@ -103,11 +103,12 @@ flowchart TD
     V -- No --> R401["401 Unauthorized"]
     V -- Yes --> S{"scp contains<br/>access_as_user?"}
     S -- No --> R403A["403 Forbidden"]
-    S -- Yes --> P{"Route under<br/>/api/users?"}
-    P -- "No. /api/me/*" --> OBO["Acquire Graph token via OBO"]
+    S -- Yes --> P{"Write?<br/>PATCH /api/users/id"}
+    P -- "No. Any GET" --> OBO["Acquire Graph token via OBO"]
     P -- Yes --> ROLE{"roles contains<br/>ApplicationAdmin?"}
-    ROLE -- No --> R403B["403 Forbidden<br/>UI hides the tab instead"]
-    ROLE -- Yes --> OBO
+    ROLE -- No --> R403B["403 Forbidden<br/>UI hides the Edit action instead"]
+    ROLE -- Yes --> OBOW["Acquire Graph token via OBO<br/>with User.ReadWrite.All"]
+    OBOW --> GERR
     OBO --> GERR{"Graph consent<br/>missing?"}
     GERR -- Yes --> R403C["403 via GraphExceptionHandler<br/>Additional consent required"]
     GERR -- No --> OK["200 with mapped response"]
@@ -118,9 +119,13 @@ Two things worth calling out:
 - **`MapInboundClaims = false` is load bearing.** By default ASP.NET renames the `roles` claim to a
   long WS-Federation URI, which makes `RequireRole("ApplicationAdmin")` fail silently with a `403`
   even when the role is present in the token.
-- **The role check is the only real gate.** `User.Read.All` is a *delegated* permission with
-  tenant-wide admin consent, so Graph would let any signed-in user enumerate the directory. Nothing
-  but the `ApplicationAdmin` check in `UserEndpoints.cs` prevents that.
+- **Reads are open, writes are gated.** Any signed-in user may search and read profiles, as they
+  can in Outlook or Teams. `User.ReadWrite.All` is a *delegated* permission with tenant-wide admin
+  consent, so the `ApplicationAdmin` check on `PATCH /api/users/{id}` is what stops ordinary users
+  from reaching it. The write scope is requested only for that call, so read tokens stay read-only.
+- **Graph still checks the user.** Delegated permissions are capped by the caller's own directory
+  privileges, so editing another user also needs an Entra directory role such as
+  **User Administrator**. Without one, Graph returns `403 Insufficient privileges`.
 
 ## Endpoints
 
@@ -129,12 +134,15 @@ Two things worth calling out:
 | `GET /api/me/context` | `access_as_user` | none (reads token claims) |
 | `GET /api/me` | `access_as_user` | `/me` |
 | `GET /api/me/groups` | `access_as_user` | `/me/memberOf` |
-| `GET /api/users?search=&top=` | `access_as_user` + `ApplicationAdmin` role | `/users?$search=` |
-| `GET /api/users/{id}` | `access_as_user` + `ApplicationAdmin` role | `/users/{id}` |
-| `GET /api/users/{id}/groups` | `access_as_user` + `ApplicationAdmin` role | `/users/{id}/memberOf` |
+| `GET /api/users/properties` | `access_as_user` | none (static catalog) |
+| `GET /api/users?search=&top=` | `access_as_user` | `/users?$search=` |
+| `GET /api/users/{id}` | `access_as_user` | `/users/{id}` |
+| `GET /api/users/{id}/groups` | `access_as_user` | `/users/{id}/memberOf` |
+| `PATCH /api/users/{id}` | `access_as_user` + `ApplicationAdmin` role | `PATCH /users/{id}` |
 
-The two by-id routes back the **Details** action on each row of the search results in the
-**Other Users** tab; they inherit the same role gate as the search itself.
+The by-id routes back the **Details** and **Edit** actions on each row of the search results in the
+**Other Users** tab. The edit form sends display name, given name, surname, job title, department,
+office and mobile phone; a blank field clears that property in the directory.
 
 Query and route parameters are bound to `[AsParameters]` models in
 [src/Poc.Api/Models/Requests.cs](src/Poc.Api/Models/Requests.cs) and validated by
@@ -156,7 +164,7 @@ What the script does:
 
 1. Creates **PoC API** — exposes the `access_as_user` scope, defines the `ApplicationAdmin`
    app role, requests the delegated Graph permissions `User.Read`, `User.Read.All`,
-   `GroupMember.Read.All`, and issues a client secret for the OBO exchange.
+   `User.ReadWrite.All`, `GroupMember.Read.All`, and issues a client secret for the OBO exchange.
 2. Creates **PoC SPA** — SPA redirect URI `http://localhost:4200`, permission to call
    `access_as_user`, and is pre-authorized on the API so users see a single consent prompt.
 3. Grants admin consent for both registrations.
@@ -196,8 +204,8 @@ npm start
 ```
 
 Open `http://localhost:4200`. The **About** tab explains the flow without signing in. Sign in, then
-choose **Request my Entra info** on the **My Information** tab. If your account holds the
-`ApplicationAdmin` role, an **Other Users** tab appears alongside it.
+choose **Request my Entra info** on the **My Information** tab, or search on **Other Users**. If your
+account holds the `ApplicationAdmin` role, an **Edit** action appears on each user's details.
 
 ## 4. Deploy to Azure
 

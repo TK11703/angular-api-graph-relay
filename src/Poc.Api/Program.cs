@@ -31,7 +31,7 @@ builder.Services.AddAuthorizationBuilder()
         .RequireAuthenticatedUser()
         .RequireScope(Policies.ApiScope)
         .Build())
-    .AddPolicy(Policies.ApplicationAdmin, policy => policy
+    .AddPolicy(Policies.CanEditUsers, policy => policy
         .RequireAuthenticatedUser()
         .RequireScope(Policies.ApiScope)
         .RequireRole(Policies.ApplicationAdminRole));

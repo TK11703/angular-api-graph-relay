@@ -66,7 +66,7 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
 
 # The Graph first-party app id is identical in every cloud; only the endpoints differ.
 $GraphAppId = '00000003-0000-0000-c000-000000000000'
-$GraphDelegatedPermissions = @('openid', 'profile', 'offline_access', 'User.Read', 'User.Read.All', 'GroupMember.Read.All')
+$GraphDelegatedPermissions = @('openid', 'profile', 'offline_access', 'User.Read', 'User.Read.All', 'User.ReadWrite.All', 'GroupMember.Read.All')
 
 # Workload identity federation uses a different token-exchange audience per cloud.
 $TokenExchangeAudiences = @{
@@ -234,7 +234,7 @@ Invoke-GraphRequest -Method PATCH -Path "applications/$apiObjectId" -Body @{
             id                 = $adminRoleId
             value              = 'ApplicationAdmin'
             displayName        = 'Application Administrator'
-            description        = 'Can query Entra ID information for other users in the tenant.'
+            description        = 'Can edit Entra ID profile information for other users in the tenant.'
             allowedMemberTypes = @('User')
             isEnabled          = $true
         }

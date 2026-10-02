@@ -1,5 +1,6 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Component, computed, inject, signal } from '@angular/core';
+import { NonNullableFormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 
 import { About } from './about/about';
 import { ApiService } from './api/api.service';
@@ -9,12 +10,13 @@ import {
   UserProfile,
   UserPropertyCatalog,
   UserSearchResponse,
+  UserUpdate,
 } from './api/models';
 import { AuthService } from './auth/auth.service';
 
 @Component({
   selector: 'app-root',
-  imports: [About],
+  imports: [About, ReactiveFormsModule],
   template: `
     <header>
       <div class="brand">
@@ -84,8 +86,7 @@ import { AuthService } from './auth/auth.service';
             sending the access token MSAL already holds. The browser has no permission to read Microsoft Graph, so
             the API swaps that token for a Graph one on your behalf and reads the directory <em>as you</em> &mdash;
             you see exactly what your own account is allowed to see, nothing more. Reading yourself needs only the
-            <code>User.Read</code> delegated permission, which is why this tab works for every signed-in account
-            while <strong>Other Users</strong> requires an app role.
+            <code>User.Read</code> delegated permission, which is why this tab works for every signed-in account.
           </p>
 
           <button (click)="loadMyInfo()" [disabled]="busy()">Request my Entra info</button>
@@ -118,20 +119,15 @@ import { AuthService } from './auth/auth.service';
 
           <p class="lede">
             Searching calls <code>GET /api/users</code>, which runs the same on-behalf-of exchange as the previous
-            tab but reaches further into the directory. The Graph permission behind it &mdash;
-            <code>User.Read.All</code> &mdash; was consented once for the whole tenant, so the token the API gets
-            would happily enumerate every user for <em>anyone</em> who signs in. The
-            <code>ApplicationAdmin</code> app role check on this endpoint is the only thing standing in the way,
-            which is the point the demo is making: Entra decides who you are, your code still has to decide what
-            you may do.
+            tab but reaches further into the directory using <code>User.Read.All</code>. Reading is open to every
+            signed-in user &mdash; just as it is in Outlook or Teams. Changing someone else's profile is not:
+            <code>PATCH /api/users/:id</code> demands the <code>ApplicationAdmin</code> app role, and only then does
+            the API ask Entra for a <code>User.ReadWrite.All</code> Graph token. Entra decides who you are, your code
+            still has to decide what you may do &mdash; and Graph still checks that your account holds a directory
+            role, such as User Administrator, that permits the edit.
           </p>
 
-          @if (!context()?.isApplicationAdmin) {
-            <p class="hint">
-              Requires the <code>ApplicationAdmin</code> app role. Assign it in Entra ID, then sign out and back in.
-            </p>
-          } @else {
-            <div class="search">
+          <div class="search">
               <input
                 type="search"
                 placeholder="Name, mail or UPN (min. 2 characters)"
@@ -217,17 +213,47 @@ import { AuthService } from './auth/auth.service';
               <div class="detail">
                 <div class="detail-head">
                   <h3>{{ person.displayName }}</h3>
-                  <button type="button" class="link" (click)="closeDetails()">Close</button>
+                  <div>
+                    @if (context()?.isApplicationAdmin && !editing()) {
+                      <button type="button" class="link" [disabled]="busy()" (click)="startEdit(person)">Edit</button>
+                    }
+                    <button type="button" class="link" (click)="closeDetails()">Close</button>
+                  </div>
                 </div>
 
+                @if (editing()) {
+                  <p class="hint">
+                    Saving sends <code>PATCH /api/users/:id</code>, gated by the <code>ApplicationAdmin</code> app
+                    role. Blank fields are cleared in the directory.
+                  </p>
+
+                  <form class="edit" [formGroup]="editForm" (ngSubmit)="saveEdit()">
+                    @for (field of editFields; track field.name) {
+                      <label>
+                        <span>{{ field.label }}</span>
+                        <input type="text" [formControlName]="field.name" />
+                        @if (editForm.controls[field.name].invalid && editForm.controls[field.name].touched) {
+                          <small class="invalid">{{ field.hint }}</small>
+                        }
+                      </label>
+                    }
+                    <div class="edit-actions">
+                      <button type="submit" [disabled]="busy() || editForm.invalid || editForm.pristine">Save</button>
+                      <button type="button" class="secondary" [disabled]="busy()" (click)="editing.set(false)">
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                } @else {
                 <p class="hint">
                   Two more on-behalf-of calls &mdash; <code>GET /api/users/:id</code> and
-                  <code>/api/users/:id/groups</code> &mdash; behind the same
-                  <code>ApplicationAdmin</code> gate as the search.
+                  <code>/api/users/:id/groups</code> &mdash; open to any signed-in user, like the search.
                 </p>
 
                 <dl>
                   <dt>UPN</dt><dd>{{ person.userPrincipalName ?? '—' }}</dd>
+                  <dt>Given name</dt><dd>{{ person.givenName ?? '—' }}</dd>
+                  <dt>Surname</dt><dd>{{ person.surname ?? '—' }}</dd>
                   <dt>Mail</dt><dd>{{ person.mail ?? '—' }}</dd>
                   <dt>Job title</dt><dd>{{ person.jobTitle ?? '—' }}</dd>
                   <dt>Department</dt><dd>{{ person.department ?? '—' }}</dd>
@@ -246,9 +272,9 @@ import { AuthService } from './auth/auth.service';
                 } @else {
                   <p class="hint">No group memberships returned.</p>
                 }
+                }
               </div>
             }
-          }
         </section>
           }
         }
@@ -335,6 +361,13 @@ import { AuthService } from './auth/auth.service';
     .detail-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
     .detail h3 { margin: 0; }
     .detail dl { margin-top: .75rem; }
+    .edit { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: .75rem 1.25rem; }
+    .edit label { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; color: #5c5c66; }
+    .edit input { padding: .4rem .55rem; border: 1px solid #b9b9bf; border-radius: .25rem; font: inherit; color: #1b1b1f; }
+    .edit input.ng-invalid.ng-touched { border-color: #d13438; }
+    .edit .invalid { color: #a4262c; }
+    .edit-actions { grid-column: 1 / -1; display: flex; gap: .5rem; }
+    button.secondary { background: #fff; color: #0f6cbd; }
     .error { background: #fdf3f4; border: 1px solid #d13438; color: #a4262c; padding: .75rem; border-radius: .25rem; }
     .hint { color: #5c5c66; }
     .lede { color: #45454d; font-size: .9rem; line-height: 1.55; max-width: 46rem; margin: 0 0 1.25rem; }
@@ -353,6 +386,7 @@ import { AuthService } from './auth/auth.service';
 export class App {
   protected readonly auth = inject(AuthService);
   private readonly api = inject(ApiService);
+  private readonly fb = inject(NonNullableFormBuilder);
 
   /** Signed-out visitors only get the About tab, so start them there. */
   protected readonly tab = signal<'me' | 'others' | 'about'>(this.auth.isSignedIn() ? 'me' : 'about');
@@ -370,6 +404,28 @@ export class App {
   protected readonly department = signal('');
   protected readonly busy = signal(false);
   protected readonly error = signal<string | null>(null);
+  protected readonly editing = signal(false);
+
+  /** Limits mirror the API's validation (which mirrors Graph's), so most mistakes never leave the browser. */
+  protected readonly editForm = this.fb.group({
+    displayName: ['', [Validators.required, Validators.maxLength(256)]],
+    givenName: ['', Validators.maxLength(64)],
+    surname: ['', Validators.maxLength(64)],
+    jobTitle: ['', Validators.maxLength(128)],
+    department: ['', Validators.maxLength(64)],
+    officeLocation: ['', Validators.maxLength(128)],
+    mobilePhone: ['', [Validators.maxLength(64), Validators.pattern(/^[0-9 +().-]*$/)]],
+  });
+
+  protected readonly editFields: { name: keyof UserUpdate; label: string; hint: string }[] = [
+    { name: 'displayName', label: 'Display name', hint: 'Required, up to 256 characters.' },
+    { name: 'givenName', label: 'Given name', hint: 'Up to 64 characters.' },
+    { name: 'surname', label: 'Surname', hint: 'Up to 64 characters.' },
+    { name: 'jobTitle', label: 'Job title', hint: 'Up to 128 characters.' },
+    { name: 'department', label: 'Department', hint: 'Up to 64 characters.' },
+    { name: 'officeLocation', label: 'Office', hint: 'Up to 128 characters.' },
+    { name: 'mobilePhone', label: 'Mobile phone', hint: 'Digits, spaces and + ( ) . - only.' },
+  ];
 
   /** The properties the API's $search clause actually probes, for the help text. */
   protected readonly searchedFields = computed(() =>
@@ -379,15 +435,10 @@ export class App {
   constructor() {
     if (this.auth.isSignedIn()) {
       this.api.getMyContext().subscribe({
-        next: (ctx) => {
-          this.context.set(ctx);
-          // The catalog endpoint demands the same app role, so only ask for it once we know we have it.
-          if (ctx.isApplicationAdmin) {
-            this.loadCatalog();
-          }
-        },
+        next: (ctx) => this.context.set(ctx),
         error: (err) => this.error.set(describe(err)),
       });
+      this.loadCatalog();
     }
   }
 
@@ -439,6 +490,7 @@ export class App {
     }
 
     this.start();
+    this.editing.set(false);
     this.detailId.set(id);
     this.api.getUser(id).subscribe({
       next: (person) => {
@@ -453,9 +505,59 @@ export class App {
   }
 
   protected closeDetails(): void {
+    this.editing.set(false);
     this.detailId.set(null);
     this.detail.set(null);
     this.detailGroups.set([]);
+  }
+
+  protected startEdit(person: UserProfile): void {
+    this.editForm.reset({
+      displayName: person.displayName ?? '',
+      givenName: person.givenName ?? '',
+      surname: person.surname ?? '',
+      jobTitle: person.jobTitle ?? '',
+      department: person.department ?? '',
+      officeLocation: person.officeLocation ?? '',
+      mobilePhone: person.mobilePhone ?? '',
+    });
+    this.editing.set(true);
+  }
+
+  protected saveEdit(): void {
+    const id = this.detailId();
+    if (!id || this.editForm.invalid) {
+      return;
+    }
+
+    this.start();
+    this.api.updateUser(id, this.editForm.getRawValue()).subscribe({
+      next: (updated) =>
+        this.finish(() => {
+          this.detail.set(updated);
+          this.editing.set(false);
+          // Keep the results table in step with the edit without re-running the search.
+          this.results.update((response) =>
+            response && {
+              ...response,
+              users: response.users.map((row) =>
+                row.id !== id
+                  ? row
+                  : {
+                      ...row,
+                      values: Object.fromEntries(
+                        Object.entries(row.values).map(([key, value]) => [
+                          key,
+                          key in updated ? (updated[key as keyof UserProfile] ?? null) : value,
+                        ]),
+                      ),
+                    },
+              ),
+            },
+          );
+        }),
+      error: (err) => this.fail(err),
+    });
   }
 
   private loadCatalog(): void {

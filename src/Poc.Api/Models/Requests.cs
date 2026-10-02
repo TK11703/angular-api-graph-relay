@@ -47,6 +47,36 @@ public sealed class UserSearchRequest : IValidatableObject
     }
 }
 
+/// <summary>
+/// Editable profile fields. Every field is sent; a null or blank value clears it in the directory.
+/// Lengths mirror the Microsoft Graph limits for each property.
+/// </summary>
+public sealed class UserUpdateRequest
+{
+    [Required(AllowEmptyStrings = false, ErrorMessage = "Display name is required.")]
+    [StringLength(256)]
+    public string DisplayName { get; init; } = string.Empty;
+
+    [StringLength(64)]
+    public string? GivenName { get; init; }
+
+    [StringLength(64)]
+    public string? Surname { get; init; }
+
+    [StringLength(128)]
+    public string? JobTitle { get; init; }
+
+    [StringLength(64)]
+    public string? Department { get; init; }
+
+    [StringLength(128)]
+    public string? OfficeLocation { get; init; }
+
+    [StringLength(64)]
+    [RegularExpression(@"^[0-9 +().-]*$", ErrorMessage = "Mobile phone may only contain digits, spaces and + ( ) . -")]
+    public string? MobilePhone { get; init; }
+}
+
 /// <summary>Route parameter for a single-user lookup.</summary>
 public sealed class UserLookupRequest
 {

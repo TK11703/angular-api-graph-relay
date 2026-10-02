@@ -81,6 +81,7 @@ interface Phase {
           <ul>
             <li><code>User.Read</code></li>
             <li><code>User.Read.All</code></li>
+            <li><code>User.ReadWrite.All</code></li>
             <li><code>GroupMember.Read.All</code></li>
           </ul>
         </div>
@@ -93,11 +94,11 @@ interface Phase {
         </thead>
         <tbody>
           <tr>
-            <td><code>/api/me</code>, <code>/api/me/groups</code>, <code>/api/me/context</code></td>
+            <td>Every <code>GET</code> under <code>/api/me</code> and <code>/api/users</code></td>
             <td>Valid token carrying scope <code>access_as_user</code></td>
           </tr>
           <tr>
-            <td><code>/api/users</code> and everything beneath it</td>
+            <td><code>PATCH /api/users/:id</code></td>
             <td>The same, <em>plus</em> the <code>ApplicationAdmin</code> app role</td>
           </tr>
         </tbody>
@@ -110,9 +111,10 @@ interface Phase {
           from the browser will not open the directory.
         </li>
         <li>
-          <strong>The role check is load bearing.</strong> <code>User.Read.All</code> is a delegated permission
-          with tenant-wide admin consent, so Graph would happily let any signed-in user enumerate the directory.
-          The <code>ApplicationAdmin</code> check in the API is the only thing preventing that.
+          <strong>The role check guards writes.</strong> <code>User.ReadWrite.All</code> is a delegated permission
+          with tenant-wide admin consent, so the <code>ApplicationAdmin</code> check in the API is what keeps
+          ordinary users from editing profiles. Graph adds a second check: the caller must also hold a directory
+          role, such as User Administrator, that allows the change.
         </li>
         <li>
           <strong>Requested properties are allow-listed server side.</strong> Nothing you type reaches the Graph
@@ -240,7 +242,7 @@ export class About {
           from: 'api',
           title: 'Validate the token',
           detail:
-            'Signature, issuer and audience first, then the access_as_user scope and the ApplicationAdmin role.',
+            'Signature, issuer and audience first, then the access_as_user scope. Edits additionally require the ApplicationAdmin role.',
         },
         {
           from: 'api',
@@ -253,7 +255,7 @@ export class About {
           from: 'entra',
           to: 'api',
           title: 'A Graph token carrying your identity',
-          detail: 'Scoped to User.Read, User.Read.All and GroupMember.Read.All.',
+          detail: 'Scoped to User.Read, User.Read.All and GroupMember.Read.All. User.ReadWrite.All is requested only for edits.',
         },
         {
           from: 'api',

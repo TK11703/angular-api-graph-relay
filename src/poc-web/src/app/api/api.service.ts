@@ -8,6 +8,7 @@ import {
   UserProfile,
   UserPropertyCatalog,
   UserSearchResponse,
+  UserUpdate,
 } from './models';
 
 @Injectable({ providedIn: 'root' })
@@ -53,5 +54,10 @@ export class ApiService {
 
   getUserGroups(id: string): Observable<DirectoryGroup[]> {
     return this.http.get<DirectoryGroup[]>(`${this.baseUrl}/users/${encodeURIComponent(id)}/groups`);
+  }
+
+  /** Requires the ApplicationAdmin app role; returns the profile as re-read from Graph. */
+  updateUser(id: string, update: UserUpdate): Observable<UserProfile> {
+    return this.http.patch<UserProfile>(`${this.baseUrl}/users/${encodeURIComponent(id)}`, update);
   }
 }

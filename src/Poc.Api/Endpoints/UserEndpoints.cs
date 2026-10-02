@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Graph;
+using Microsoft.Identity.Web;
 using Poc.Api.Authorization;
 using Poc.Api.Infrastructure;
 using Poc.Api.Models;
@@ -9,10 +11,8 @@ public static class UserEndpoints
 {
     public static RouteGroupBuilder MapUserEndpoints(this RouteGroupBuilder group)
     {
-        // Every route here additionally demands the ApplicationAdmin app role.
-        var users = group.MapGroup("/users")
-            .RequireAuthorization(Policies.ApplicationAdmin)
-            .WithTags("Users");
+        // Reads only need the default policy; writes additionally demand the ApplicationAdmin app role.
+        var users = group.MapGroup("/users").WithTags("Users");
 
         users.MapGet("/properties", () => Results.Ok(new UserPropertyCatalogResponse(
             UserPropertyCatalog.Selectable,
@@ -65,6 +65,24 @@ public static class UserEndpoints
             return Results.Ok(memberOf.ToGroups());
         })
         .WithName("GetUserGroups");
+
+        users.MapPatch("/{id}", async (
+            [AsParameters] UserLookupRequest target,
+            [FromBody] UserUpdateRequest update,
+            GraphServiceClient graph,
+            CancellationToken ct) =>
+        {
+            // Write scope is requested only for this call, so read-only OBO tokens stay read-only.
+            await graph.Users[target.Id].PatchAsync(
+                update.ToGraphPatch(), r => r.Options.WithScopes(GraphScopes.UserWrite), ct);
+
+            var user = await graph.Users[target.Id].GetAsync(
+                r => r.QueryParameters.Select = GraphMappings.ProfileSelect, ct);
+
+            return user is null ? Results.NotFound() : Results.Ok(user.ToProfile());
+        })
+        .RequireAuthorization(Policies.CanEditUsers)
+        .WithName("UpdateUser");
 
         return group;
     }
