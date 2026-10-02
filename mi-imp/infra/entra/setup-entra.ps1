@@ -316,6 +316,9 @@ if ($AssignUserAdministratorRoleToManagedIdentity -and -not $ManagedIdentityPrin
     throw 'Pass -ManagedIdentityResourceId, or -ManagedIdentityPrincipalId for a system-assigned identity.'
 }
 
+# Grants need Privileged Role Administrator / Global Administrator; failures are collected so the rest still runs.
+$pendingGrants = [System.Collections.Generic.List[string]]::new()
+
 if ($ManagedIdentityPrincipalId) {
     Write-Host '==> Granting Microsoft Graph application permissions to the managed identity' -ForegroundColor Cyan
 
@@ -334,12 +337,18 @@ if ($ManagedIdentityPrincipalId) {
             continue
         }
 
-        Invoke-GraphRequest -Method POST -Path "servicePrincipals/$ManagedIdentityPrincipalId/appRoleAssignments" -Body @{
-            principalId = $ManagedIdentityPrincipalId
-            resourceId  = $graphSp.id
-            appRoleId   = $appRoleId
+        try {
+            Invoke-GraphRequest -Method POST -Path "servicePrincipals/$ManagedIdentityPrincipalId/appRoleAssignments" -Body @{
+                principalId = $ManagedIdentityPrincipalId
+                resourceId  = $graphSp.id
+                appRoleId   = $appRoleId
+            }
+            Write-Host "  granted $permission"
         }
-        Write-Host "  granted $permission"
+        catch {
+            Write-Warning "Could not grant $permission`: $_"
+            $pendingGrants.Add("Graph application permission $permission")
+        }
     }
     Write-Host '  managed identity tokens are cached for up to 24h; restart the API revision to pick up new grants sooner'
 }
@@ -354,12 +363,18 @@ if ($AssignUserAdministratorRoleToManagedIdentity) {
         Write-Host '  already assigned'
     }
     else {
-        Invoke-GraphRequest -Method POST -Path 'roleManagement/directory/roleAssignments' -Body @{
-            principalId      = $ManagedIdentityPrincipalId
-            roleDefinitionId = $UserAdministratorRoleId
-            directoryScopeId = '/'
+        try {
+            Invoke-GraphRequest -Method POST -Path 'roleManagement/directory/roleAssignments' -Body @{
+                principalId      = $ManagedIdentityPrincipalId
+                roleDefinitionId = $UserAdministratorRoleId
+                directoryScopeId = '/'
+            }
+            Write-Host '  assigned tenant-wide'
         }
-        Write-Host '  assigned tenant-wide'
+        catch {
+            Write-Warning "Could not assign User Administrator: $_"
+            $pendingGrants.Add('Directory role User Administrator')
+        }
     }
 }
 
@@ -436,4 +451,14 @@ export const environment = {
     finally {
         Pop-Location
     }
+}
+
+if ($pendingGrants.Count -gt 0) {
+    Write-Host ''
+    Write-Host '==> Managed identity access is incomplete' -ForegroundColor Yellow
+    Write-Host "  identity principal id : $ManagedIdentityPrincipalId"
+    $pendingGrants | ForEach-Object { Write-Host "  missing               : $_" }
+    Write-Host '  The deployed API cannot call Graph until these are granted. Ask a Privileged Role Administrator or'
+    Write-Host '  Global Administrator to re-run this script with the same -ManagedIdentityResourceId; it skips what is done.'
+    exit 1
 }
