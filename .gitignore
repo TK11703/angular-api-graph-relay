@@ -6,10 +6,10 @@ node_modules/
 .angular/
 
 # Local secrets and generated config
-infra/*/entra/entra-output.json
-src/*/Poc.Api/appsettings.Development.json
-src/*/poc-web/src/environments/environment.ts
-src/*/poc-web/src/environments/environment.azure.ts
+*/infra/entra/entra-output.json
+*/src/Poc.Api/appsettings.Development.json
+*/src/poc-web/src/environments/environment.ts
+*/src/poc-web/src/environments/environment.azure.ts
 *.user
 
 # Editor
