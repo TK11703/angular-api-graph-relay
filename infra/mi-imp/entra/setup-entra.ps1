@@ -1,38 +1,41 @@
 <#
 .SYNOPSIS
-    Creates the two Entra ID app registrations this PoC needs.
+    Creates the Entra ID app registrations for the managed-identity implementation, and grants the
+    API's managed identity its Microsoft Graph application permissions.
 
 .DESCRIPTION
-    App 1 - "PoC API" (confidential client)
+    App 1 - "PoC API (MI)" (resource only)
         * exposes the delegated scope  access_as_user
         * defines the app role         ApplicationAdmin
-        * holds delegated Microsoft Graph permissions used by the on-behalf-of flow
-        * gets a client secret so it can redeem the OBO token locally, and optionally a
-          federated identity credential so a managed identity replaces that secret when hosted
+        * holds no credential and no Graph permissions: it only validates inbound tokens
 
-    App 2 - "PoC SPA" (public client)
+    App 2 - "PoC SPA (MI)" (public client)
         * SPA redirect URI for the Angular dev server
         * permission to call the API's access_as_user scope (pre-authorized, so no second consent prompt)
 
-    The script is idempotent: re-running it reuses existing registrations and their
-    scope / app-role identifiers.
+    Managed identity (with -ManagedIdentityResourceId / -ManagedIdentityPrincipalId)
+        * Microsoft Graph application permissions (app-only, tenant-wide)
+        * optionally the User Administrator directory role
+
+    The identity only exists after infra/mi-imp/azure/deploy.ps1 has run, so run this script once
+    before deploying and again afterwards with the identity. The script is idempotent.
 
 .NOTES
     Requires the Application Administrator role (to create apps) and
-    Privileged Role Administrator / Global Administrator (to grant admin consent).
+    Privileged Role Administrator / Global Administrator (to grant Graph application permissions).
 
 .EXAMPLE
     ./setup-entra.ps1 -AssignAdminRoleToCurrentUser -ApplyLocalConfig
 
 .EXAMPLE
-    ./setup-entra.ps1 -ConfigureFederatedCredential -ManagedIdentityResourceId /subscriptions/.../userAssignedIdentities/poc-api
+    ./setup-entra.ps1 -ManagedIdentityResourceId /subscriptions/.../userAssignedIdentities/aagrmi-api-id
 #>
 [CmdletBinding()]
 param(
-    [string] $ApiAppName = 'PoC API',
-    [string] $SpaAppName = 'PoC SPA',
+    [string] $ApiAppName = 'PoC API (MI)',
+    [string] $SpaAppName = 'PoC SPA (MI)',
     [string] $SpaRedirectUri = 'http://localhost:4200',
-    # Deployed SPA origins, e.g. the Static Web Apps URL. Existing redirect URIs are kept.
+    # Deployed SPA origins. Existing redirect URIs are kept.
     [string[]] $AdditionalSpaRedirectUris = @(),
     [string] $ApiBaseUrl = 'https://localhost:7182/api',
 
@@ -45,17 +48,15 @@ param(
     # Grants the current signed-in user the ApplicationAdmin app role.
     [switch] $AssignAdminRoleToCurrentUser,
 
-    # Registers a managed identity as a federated credential on the API app, so the deployed
-    # API can drop the client secret. Supply the user-assigned identity's resource id, or the
-    # principal id directly (required for a system-assigned identity).
-    [switch] $ConfigureFederatedCredential,
+    # The API's managed identity. Supply the user-assigned identity's resource id, or the principal
+    # id directly (required for a system-assigned identity). Omit to skip the Graph grants.
     [string] $ManagedIdentityResourceId,
     [string] $ManagedIdentityPrincipalId,
-    [string] $ManagedIdentityClientId,
-    [string] $FederatedCredentialName = 'poc-api-managed-identity',
-    [string] $FederatedAudience,
+    [string[]] $ManagedIdentityGraphAppRoles = @('User.Read.All', 'GroupMember.Read.All', 'User.ReadWrite.All'),
+    # Graph only lets app-only callers edit some properties (e.g. mobilePhone) with a directory role.
+    [switch] $AssignUserAdministratorRoleToManagedIdentity,
 
-    # Writes the resulting ids into src/obo-imp/poc-web/.../environment.ts and the API user-secrets.
+    # Writes the resulting ids into src/mi-imp/poc-web/.../environment.ts and the API user-secrets.
     [switch] $ApplyLocalConfig
 )
 
@@ -64,20 +65,13 @@ if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
 
-# The Graph first-party app id is identical in every cloud; only the endpoints differ.
+# First-party app ids and built-in role template ids are identical in every cloud.
 $GraphAppId = '00000003-0000-0000-c000-000000000000'
-$GraphDelegatedPermissions = @('openid', 'profile', 'offline_access', 'User.Read', 'User.Read.All', 'User.ReadWrite.All', 'GroupMember.Read.All')
-
-# Workload identity federation uses a different token-exchange audience per cloud.
-$TokenExchangeAudiences = @{
-    'AzureCloud'        = 'api://AzureADTokenExchange'
-    'AzureUSGovernment' = 'api://AzureADTokenExchangeUSGov'
-    'AzureChinaCloud'   = 'api://AzureADTokenExchangeChina'
-}
+$UserAdministratorRoleId = 'fe930be7-5e62-47db-91af-98c3a49a38b1'
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
-$ApiDir = Join-Path $RepoRoot 'src/obo-imp/Poc.Api'
-$WebDir = Join-Path $RepoRoot 'src/obo-imp/poc-web'
+$ApiDir = Join-Path $RepoRoot 'src/mi-imp/Poc.Api'
+$WebDir = Join-Path $RepoRoot 'src/mi-imp/poc-web'
 
 #region helpers ---------------------------------------------------------------
 
@@ -180,16 +174,6 @@ Write-Host "  cloud     : $($cloud.name)"
 Write-Host "  graph     : $GraphApiUrl"
 Write-Host "  authority : $AuthorityHost"
 
-Write-Host '==> Resolving Microsoft Graph delegated permission ids' -ForegroundColor Cyan
-$graphSp = Invoke-AzJson -Arguments @('ad', 'sp', 'show', '--id', $GraphAppId)
-$graphScopeIds = @{}
-foreach ($scope in $graphSp.oauth2PermissionScopes) { $graphScopeIds[$scope.value] = $scope.id }
-
-$graphResourceAccess = foreach ($permission in $GraphDelegatedPermissions) {
-    if (-not $graphScopeIds.ContainsKey($permission)) { throw "Microsoft Graph does not expose delegated permission '$permission'." }
-    @{ id = $graphScopeIds[$permission]; type = 'Scope' }
-}
-
 # ---------------------------------------------------------------- API app ----
 Write-Host "==> API app registration: $ApiAppName" -ForegroundColor Cyan
 $apiApp = Get-AppByDisplayName -DisplayName $ApiAppName
@@ -225,6 +209,7 @@ $apiScope = @{
     userConsentDescription  = 'Allows the app to call the PoC API as you.'
 }
 
+# requiredResourceAccess is emptied: Graph is reached through the managed identity, not this app.
 Invoke-GraphRequest -Method PATCH -Path "applications/$apiObjectId" -Body @{
     identifierUris         = @("api://$apiAppId")
     api                    = @{
@@ -241,21 +226,11 @@ Invoke-GraphRequest -Method PATCH -Path "applications/$apiObjectId" -Body @{
             isEnabled          = $true
         }
     )
-    requiredResourceAccess = @(
-        @{ resourceAppId = $GraphAppId; resourceAccess = @($graphResourceAccess) }
-    )
+    requiredResourceAccess = @()
 }
-Write-Host '  identifier uri, access_as_user scope, ApplicationAdmin role and Graph permissions configured'
+Write-Host '  identifier uri, access_as_user scope and ApplicationAdmin role configured'
 
 $apiSp = Confirm-ServicePrincipal -AppId $apiAppId
-
-Write-Host '  resetting client secret'
-$secret = Invoke-AzJson -Arguments @(
-    'ad', 'app', 'credential', 'reset',
-    '--id', $apiAppId,
-    '--display-name', 'poc-api-obo',
-    '--years', '1'
-)
 
 # ---------------------------------------------------------------- SPA app ----
 Write-Host "==> SPA app registration: $SpaAppName" -ForegroundColor Cyan
@@ -274,7 +249,7 @@ $spaAppId = $spaApp.appId
 
 Confirm-ServicePrincipal -AppId $spaAppId | Out-Null
 
-# Pre-authorizing the SPA avoids a second consent prompt for the API scope. Graph validates
+# Pre-authorizing the SPA avoids a consent prompt for the API scope. Graph validates
 # delegatedPermissionIds against the stored scopes, so this has to follow the PATCH above.
 # Patching `api` replaces the whole complex property, so the scope is re-sent with it.
 Invoke-GraphRequest -Method PATCH -Path "applications/$apiObjectId" -Body @{
@@ -300,16 +275,13 @@ Invoke-GraphRequest -Method PATCH -Path "applications/$spaObjectId" -Body @{
 }
 Write-Host "  redirect uris $($spaRedirectUris -join ', ') and API permission configured"
 
-# ----------------------------------------------------------- admin consent ---
-Write-Host '==> Granting admin consent' -ForegroundColor Cyan
-foreach ($target in @(@{ Name = 'API -> Microsoft Graph'; Id = $apiAppId }, @{ Name = 'SPA -> API'; Id = $spaAppId })) {
-    try {
-        Invoke-Az -Arguments @('ad', 'app', 'permission', 'admin-consent', '--id', $target.Id) | Out-Null
-        Write-Host "  consented: $($target.Name)"
-    }
-    catch {
-        Write-Warning "Could not grant admin consent for $($target.Name). Grant it in the portal (Entra ID > App registrations > API permissions). Details: $_"
-    }
+Write-Host '==> Granting admin consent (SPA -> API)' -ForegroundColor Cyan
+try {
+    Invoke-Az -Arguments @('ad', 'app', 'permission', 'admin-consent', '--id', $spaAppId) | Out-Null
+    Write-Host '  consented'
+}
+catch {
+    Write-Warning "Could not grant admin consent for SPA -> API. Grant it in the portal (Entra ID > App registrations > API permissions). Details: $_"
 }
 
 # -------------------------------------------------------------- app role -----
@@ -333,57 +305,62 @@ if ($AssignAdminRoleToCurrentUser) {
     }
 }
 
-# ------------------------------------------------------ federated credential --
-if ($ConfigureFederatedCredential) {
-    Write-Host '==> Configuring federated identity credential' -ForegroundColor Cyan
+# ------------------------------------------------- managed identity access ---
+if ($ManagedIdentityResourceId) {
+    $identity = Invoke-AzJson -Arguments @('identity', 'show', '--ids', $ManagedIdentityResourceId)
+    $ManagedIdentityPrincipalId = $identity.principalId
+    Write-Host "==> Managed identity $($identity.name)" -ForegroundColor Cyan
+}
 
-    if ($ManagedIdentityResourceId) {
-        $identity = Invoke-AzJson -Arguments @('identity', 'show', '--ids', $ManagedIdentityResourceId)
-        $ManagedIdentityPrincipalId = $identity.principalId
-        $ManagedIdentityClientId = $identity.clientId
-        Write-Host "  resolved $($identity.name)"
-    }
+if ($AssignUserAdministratorRoleToManagedIdentity -and -not $ManagedIdentityPrincipalId) {
+    throw 'Pass -ManagedIdentityResourceId, or -ManagedIdentityPrincipalId for a system-assigned identity.'
+}
 
-    if (-not $ManagedIdentityPrincipalId) {
-        throw 'Pass -ManagedIdentityResourceId, or -ManagedIdentityPrincipalId for a system-assigned identity.'
-    }
+if ($ManagedIdentityPrincipalId) {
+    Write-Host '==> Granting Microsoft Graph application permissions to the managed identity' -ForegroundColor Cyan
 
-    if (-not $FederatedAudience) {
-        $FederatedAudience = $TokenExchangeAudiences[$cloud.name]
-        if (-not $FederatedAudience) { throw "No token-exchange audience known for cloud '$($cloud.name)'. Pass -FederatedAudience." }
-    }
+    $graphSp = Invoke-AzJson -Arguments @('ad', 'sp', 'show', '--id', $GraphAppId)
+    $graphAppRoleIds = @{}
+    foreach ($role in $graphSp.appRoles) { $graphAppRoleIds[$role.value] = $role.id }
 
-    # The subject is the identity's principal (object) id, not its client id.
-    $credential = @{
-        name        = $FederatedCredentialName
-        issuer      = "$AuthorityHost$tenantId/v2.0"
-        subject     = $ManagedIdentityPrincipalId
-        audiences   = @($FederatedAudience)
-        description = 'Managed identity acting as this app, replacing the client secret.'
-    }
+    $existingGrants = (Get-PropertyOrDefault (Invoke-GraphRequest -Method GET -Path "servicePrincipals/$ManagedIdentityPrincipalId/appRoleAssignments") 'value')
 
-    $existingCredentials = Invoke-GraphRequest -Method GET -Path "applications/$apiObjectId/federatedIdentityCredentials"
-    $match = (Get-PropertyOrDefault $existingCredentials 'value') |
-        Where-Object { $_.name -eq $FederatedCredentialName } | Select-Object -First 1
+    foreach ($permission in $ManagedIdentityGraphAppRoles) {
+        if (-not $graphAppRoleIds.ContainsKey($permission)) { throw "Microsoft Graph does not expose application permission '$permission'." }
+        $appRoleId = $graphAppRoleIds[$permission]
 
-    if ($match) {
-        # name is immutable, so it is omitted from the update.
-        Invoke-GraphRequest -Method PATCH -Path "applications/$apiObjectId/federatedIdentityCredentials/$($match.id)" -Body @{
-            issuer      = $credential.issuer
-            subject     = $credential.subject
-            audiences   = $credential.audiences
-            description = $credential.description
+        if ($existingGrants | Where-Object { $_.appRoleId -eq $appRoleId -and $_.resourceId -eq $graphSp.id }) {
+            Write-Host "  $permission already granted"
+            continue
         }
-        Write-Host "  updated credential '$FederatedCredentialName'"
+
+        Invoke-GraphRequest -Method POST -Path "servicePrincipals/$ManagedIdentityPrincipalId/appRoleAssignments" -Body @{
+            principalId = $ManagedIdentityPrincipalId
+            resourceId  = $graphSp.id
+            appRoleId   = $appRoleId
+        }
+        Write-Host "  granted $permission"
+    }
+    Write-Host '  managed identity tokens are cached for up to 24h; restart the API revision to pick up new grants sooner'
+}
+
+if ($AssignUserAdministratorRoleToManagedIdentity) {
+    Write-Host '==> Assigning the User Administrator directory role to the managed identity' -ForegroundColor Cyan
+
+    $filter = [uri]::EscapeDataString("principalId eq '$ManagedIdentityPrincipalId' and roleDefinitionId eq '$UserAdministratorRoleId'")
+    $existingRole = Invoke-GraphRequest -Method GET -Path "roleManagement/directory/roleAssignments?`$filter=$filter"
+
+    if (@(Get-PropertyOrDefault $existingRole 'value').Count -gt 0) {
+        Write-Host '  already assigned'
     }
     else {
-        Invoke-GraphRequest -Method POST -Path "applications/$apiObjectId/federatedIdentityCredentials" -Body $credential
-        Write-Host "  created credential '$FederatedCredentialName'"
+        Invoke-GraphRequest -Method POST -Path 'roleManagement/directory/roleAssignments' -Body @{
+            principalId      = $ManagedIdentityPrincipalId
+            roleDefinitionId = $UserAdministratorRoleId
+            directoryScopeId = '/'
+        }
+        Write-Host '  assigned tenant-wide'
     }
-
-    Write-Host "  issuer   : $($credential.issuer)"
-    Write-Host "  subject  : $ManagedIdentityPrincipalId"
-    Write-Host "  audience : $FederatedAudience"
 }
 
 # ---------------------------------------------------------------- output -----
@@ -404,10 +381,9 @@ $result = [ordered]@{
     apiBaseUrl     = $ApiBaseUrl
 }
 
-if ($ConfigureFederatedCredential) {
-    $result.federatedCredential = $FederatedCredentialName
+if ($ManagedIdentityPrincipalId) {
     $result.managedIdentityPrincipalId = $ManagedIdentityPrincipalId
-    if ($ManagedIdentityClientId) { $result.managedIdentityClientId = $ManagedIdentityClientId }
+    $result.managedIdentityGraphAppRoles = $ManagedIdentityGraphAppRoles -join ' '
 }
 
 $outputFile = Join-Path $PSScriptRoot 'entra-output.json'
@@ -415,24 +391,9 @@ $result | ConvertTo-Json -Depth 5 | Set-Content -Path $outputFile -Encoding utf8
 
 Write-Host ''
 Write-Host '==> Done' -ForegroundColor Green
-$result.GetEnumerator() | ForEach-Object { '{0,-26} {1}' -f $_.Key, $_.Value }
+$result.GetEnumerator() | ForEach-Object { '{0,-28} {1}' -f $_.Key, $_.Value }
 Write-Host ""
 Write-Host "Values written to $outputFile (git-ignored)."
-
-if ($ConfigureFederatedCredential) {
-    Write-Host ''
-    Write-Host 'Set these on the deployed API (appsettings.Production.json is already wired for it):' -ForegroundColor Yellow
-    Write-Host "  AzureAd__Instance = $AuthorityHost"
-    Write-Host "  AzureAd__TenantId = $tenantId"
-    Write-Host "  AzureAd__ClientId = $apiAppId"
-    Write-Host "  MicrosoftGraph__BaseUrl = $GraphApiUrl"
-    if ($ManagedIdentityClientId) {
-        Write-Host "  AzureAd__ClientCredentials__0__ManagedIdentityClientId = $ManagedIdentityClientId"
-    }
-    else {
-        Write-Host '  Remove ManagedIdentityClientId from appsettings.Production.json for a system-assigned identity.'
-    }
-}
 
 if ($ApplyLocalConfig) {
     Write-Host ''
@@ -441,7 +402,7 @@ if ($ApplyLocalConfig) {
     $environmentFile = Join-Path $WebDir 'src/environments/environment.ts'
     @"
 /**
- * Generated by infra/obo-imp/entra/setup-entra.ps1.
+ * Generated by infra/mi-imp/entra/setup-entra.ps1.
  * Nothing here is a secret - the SPA is a public client.
  */
 export const environment = {
@@ -462,30 +423,17 @@ export const environment = {
 "@ | Set-Content -Path $environmentFile -Encoding utf8
     Write-Host "  wrote $environmentFile"
 
+    # No secret: locally the API reaches Graph through the `az login` user (see GraphClientRegistration.cs).
     Push-Location $ApiDir
     try {
         & dotnet user-secrets init | Out-Null
         & dotnet user-secrets set 'AzureAd:Instance' $AuthorityHost | Out-Null
         & dotnet user-secrets set 'AzureAd:TenantId' $tenantId | Out-Null
         & dotnet user-secrets set 'AzureAd:ClientId' $apiAppId | Out-Null
-        & dotnet user-secrets set 'AzureAd:ClientCredentials:0:SourceType' 'ClientSecret' | Out-Null
-        & dotnet user-secrets set 'AzureAd:ClientCredentials:0:ClientSecret' $secret.password | Out-Null
         & dotnet user-secrets set 'MicrosoftGraph:BaseUrl' $GraphApiUrl | Out-Null
-        Write-Host '  API endpoints, client id / tenant id / client secret stored in dotnet user-secrets'
+        Write-Host '  API endpoints, client id and tenant id stored in dotnet user-secrets'
     }
     finally {
         Pop-Location
     }
-}
-else {
-    Write-Host ''
-    Write-Host 'Store the API client secret (shown once) with:' -ForegroundColor Yellow
-    Write-Host "  cd src/obo-imp/Poc.Api"
-    Write-Host "  dotnet user-secrets init"
-    Write-Host "  dotnet user-secrets set `"AzureAd:Instance`" `"$AuthorityHost`""
-    Write-Host "  dotnet user-secrets set `"AzureAd:TenantId`" `"$tenantId`""
-    Write-Host "  dotnet user-secrets set `"AzureAd:ClientId`" `"$apiAppId`""
-    Write-Host "  dotnet user-secrets set `"AzureAd:ClientCredentials:0:SourceType`" `"ClientSecret`""
-    Write-Host "  dotnet user-secrets set `"AzureAd:ClientCredentials:0:ClientSecret`" `"$($secret.password)`""
-    Write-Host "  dotnet user-secrets set `"MicrosoftGraph:BaseUrl`" `"$GraphApiUrl`""
 }

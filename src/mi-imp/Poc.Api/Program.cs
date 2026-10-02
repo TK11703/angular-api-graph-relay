@@ -7,14 +7,13 @@ using Poc.Api.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Validates the incoming access token issued by Entra ID, and enables the
-// on-behalf-of flow so this API can call Microsoft Graph as the signed-in user.
+// Validates the incoming access token issued by Entra ID. Graph is called app-only as the
+// API's managed identity, never with the user's token.
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddMicrosoftIdentityWebApi(builder.Configuration.GetSection("AzureAd"))
-        .EnableTokenAcquisitionToCallDownstreamApi()
-        .AddMicrosoftGraph(builder.Configuration.GetSection("MicrosoftGraph"))
-        .AddInMemoryTokenCaches();
+    .AddMicrosoftIdentityWebApi(builder.Configuration.GetSection("AzureAd"));
+
+builder.Services.AddManagedIdentityGraphClient(builder.Configuration, builder.Environment);
 
 builder.Services.Configure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>
 {

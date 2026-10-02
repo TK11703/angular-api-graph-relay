@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>91949707-c8a9-4fed-a144-5ceacaf34b84</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Azure.Identity" Version="1.17.2" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.12" />
+    <PackageReference Include="Microsoft.Graph" Version="5.51.0" />
+    <PackageReference Include="Microsoft.Identity.Web" Version="4.15.0" />
+    <!-- Lifts Microsoft.Graph's transitive Kiota off a version with a known vulnerability (NU1903); matches the OBO API. -->
+    <PackageReference Include="Microsoft.Kiota.Abstractions" Version="1.22.0" />
+  </ItemGroup>
+
+</Project>

@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Graph;
-using Microsoft.Identity.Web;
 using Poc.Api.Authorization;
 using Poc.Api.Infrastructure;
 using Poc.Api.Models;
@@ -12,6 +11,7 @@ public static class UserEndpoints
     public static RouteGroupBuilder MapUserEndpoints(this RouteGroupBuilder group)
     {
         // Reads only need the default policy; writes additionally demand the ApplicationAdmin app role.
+        // Graph runs as the managed identity, so these policies are the only per-user gate.
         var users = group.MapGroup("/users").WithTags("Users");
 
         users.MapGet("/properties", () => Results.Ok(new UserPropertyCatalogResponse(
@@ -72,9 +72,7 @@ public static class UserEndpoints
             GraphServiceClient graph,
             CancellationToken ct) =>
         {
-            // Write scope is requested only for this call, so read-only OBO tokens stay read-only.
-            await graph.Users[target.Id].PatchAsync(
-                update.ToGraphPatch(), r => r.Options.WithScopes(GraphScopes.UserWrite), ct);
+            await graph.Users[target.Id].PatchAsync(update.ToGraphPatch(), cancellationToken: ct);
 
             var user = await graph.Users[target.Id].GetAsync(
                 r => r.QueryParameters.Select = GraphMappings.ProfileSelect, ct);

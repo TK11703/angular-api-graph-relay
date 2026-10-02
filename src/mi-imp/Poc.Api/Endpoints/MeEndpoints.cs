@@ -33,19 +33,19 @@ public static class MeEndpoints
         })
         .WithName("GetMyContext");
 
-        // Calls Graph on-behalf-of the signed-in user (requires only User.Read).
-        me.MapGet("/", async (GraphServiceClient graph, CancellationToken ct) =>
+        // App-only tokens have no /me, so the caller is addressed by the object id in their access token.
+        me.MapGet("/", async (ClaimsPrincipal principal, GraphServiceClient graph, CancellationToken ct) =>
         {
-            var user = await graph.Me.GetAsync(
+            var user = await graph.Users[principal.GetObjectId()].GetAsync(
                 r => r.QueryParameters.Select = GraphMappings.ProfileSelect, ct);
 
             return user is null ? Results.NotFound() : Results.Ok(user.ToProfile());
         })
         .WithName("GetMyProfile");
 
-        me.MapGet("/groups", async (GraphServiceClient graph, CancellationToken ct) =>
+        me.MapGet("/groups", async (ClaimsPrincipal principal, GraphServiceClient graph, CancellationToken ct) =>
         {
-            var memberOf = await graph.Me.MemberOf.GetAsync(
+            var memberOf = await graph.Users[principal.GetObjectId()].MemberOf.GetAsync(
                 r => r.QueryParameters.Top = 50, ct);
 
             return Results.Ok(memberOf.ToGroups());

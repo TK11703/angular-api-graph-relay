@@ -1,6 +1,6 @@
 /**
  * Template for environment.ts, which is git-ignored because its ids are tenant-specific.
- * Run infra/obo-imp/entra/setup-entra.ps1 -ApplyLocalConfig to generate the real file, or copy
+ * Run infra/mi-imp/entra/setup-entra.ps1 -ApplyLocalConfig to generate the real file, or copy
  * this one to environment.ts and fill in the placeholders by hand.
  */
 export const environment = {

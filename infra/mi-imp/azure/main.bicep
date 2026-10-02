@@ -3,14 +3,14 @@ targetScope = 'resourceGroup'
 @description('Prefix for resource names. Lowercase letters, digits and hyphens.')
 @minLength(2)
 @maxLength(12)
-param namePrefix string = 'aagr'
+param namePrefix string = 'aagrmi'
 
 param location string = resourceGroup().location
 
 @description('Tenant that holds the PoC API app registration.')
 param entraTenantId string = tenant().tenantId
 
-@description('Client id of the PoC API app registration.')
+@description('Client id of the PoC API (MI) app registration. Used only to validate inbound tokens.')
 param apiClientId string
 
 param authorityHost string = environment().authentication.loginEndpoint
@@ -18,11 +18,6 @@ param authorityHost string = environment().authentication.loginEndpoint
 param graphBaseUrl string = environment().name == 'AzureUSGovernment'
   ? 'https://graph.microsoft.us/v1.0'
   : 'https://graph.microsoft.com/v1.0'
-
-@description('Audience the managed identity requests when acting as the app\'s federated credential. Differs per cloud.')
-param tokenExchangeAudience string = environment().name == 'AzureUSGovernment'
-  ? 'api://AzureADTokenExchangeUSGov'
-  : environment().name == 'AzureChinaCloud' ? 'api://AzureADTokenExchangeChina' : 'api://AzureADTokenExchange'
 
 @description('Full API image reference. Empty deploys only the shared infrastructure (first pass, before images exist).')
 param apiImage string = ''
@@ -152,9 +147,7 @@ module apiApp 'modules/container-app.bicep' = if (!empty(apiImage)) {
       { name: 'AzureAd__Instance', value: authorityHost }
       { name: 'AzureAd__TenantId', value: entraTenantId }
       { name: 'AzureAd__ClientId', value: apiClientId }
-      { name: 'AzureAd__ClientCredentials__0__SourceType', value: 'SignedAssertionFromManagedIdentity' }
-      { name: 'AzureAd__ClientCredentials__0__ManagedIdentityClientId', value: apiIdentity.properties.clientId }
-      { name: 'AzureAd__ClientCredentials__0__TokenExchangeUrl', value: tokenExchangeAudience }
+      { name: 'ManagedIdentity__ClientId', value: apiIdentity.properties.clientId }
       { name: 'MicrosoftGraph__BaseUrl', value: graphBaseUrl }
       { name: 'Cors__AllowedOrigins__0', value: spaUrl }
     ]
