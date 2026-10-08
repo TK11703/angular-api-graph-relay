@@ -1,0 +1,51 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "MI: build API",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "${workspaceFolder}/mi-imp/src/Poc.Api/Poc.Api.csproj", "/property:GenerateFullPaths=true", "/consoleloggerparameters:NoSummary"],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "OBO: build API",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "${workspaceFolder}/obo-imp/src/Poc.Api/Poc.Api.csproj", "/property:GenerateFullPaths=true", "/consoleloggerparameters:NoSummary"],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "MI: ng serve",
+      "type": "npm",
+      "script": "start",
+      "path": "mi-imp/src/poc-web",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "typescript",
+        "pattern": "$tsc",
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Changes detected",
+          "endsPattern": "bundle generation (complete|failed)"
+        }
+      }
+    },
+    {
+      "label": "OBO: ng serve",
+      "type": "npm",
+      "script": "start",
+      "path": "obo-imp/src/poc-web",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "typescript",
+        "pattern": "$tsc",
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Changes detected",
+          "endsPattern": "bundle generation (complete|failed)"
+        }
+      }
+    }
+  ]
+}

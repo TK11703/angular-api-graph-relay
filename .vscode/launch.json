@@ -1,0 +1,56 @@
+{
+  // Both implementations use the same ports (API 7182, SPA 4200), so run one at a time.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "MI: API",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "MI: build API",
+      "program": "${workspaceFolder}/mi-imp/src/Poc.Api/bin/Debug/net10.0/Poc.Api.dll",
+      "cwd": "${workspaceFolder}/mi-imp/src/Poc.Api",
+      "launchSettingsFilePath": "${workspaceFolder}/mi-imp/src/Poc.Api/Properties/launchSettings.json",
+      "launchSettingsProfile": "https",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "MI: SPA",
+      "type": "msedge",
+      "request": "launch",
+      "preLaunchTask": "MI: ng serve",
+      "url": "http://localhost:4200/",
+      "webRoot": "${workspaceFolder}/mi-imp/src/poc-web"
+    },
+    {
+      "name": "OBO: API",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "OBO: build API",
+      "program": "${workspaceFolder}/obo-imp/src/Poc.Api/bin/Debug/net10.0/Poc.Api.dll",
+      "cwd": "${workspaceFolder}/obo-imp/src/Poc.Api",
+      "launchSettingsFilePath": "${workspaceFolder}/obo-imp/src/Poc.Api/Properties/launchSettings.json",
+      "launchSettingsProfile": "https",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "OBO: SPA",
+      "type": "msedge",
+      "request": "launch",
+      "preLaunchTask": "OBO: ng serve",
+      "url": "http://localhost:4200/",
+      "webRoot": "${workspaceFolder}/obo-imp/src/poc-web"
+    }
+  ],
+  "compounds": [
+    {
+      "name": "MI: API + SPA",
+      "configurations": ["MI: API", "MI: SPA"],
+      "stopAll": true
+    },
+    {
+      "name": "OBO: API + SPA",
+      "configurations": ["OBO: API", "OBO: SPA"],
+      "stopAll": true
+    }
+  ]
+}
