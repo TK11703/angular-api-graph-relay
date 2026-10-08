@@ -2,7 +2,10 @@ param name string
 param location string
 param tags object = {}
 param environmentId string
-param identityId string
+@description('User-assigned identities attached to the app.')
+param identityIds array
+@description('Identity used to pull from the registry; must also be in identityIds.')
+param registryIdentityId string
 param registryServer string
 param image string
 param targetPort int = 8080
@@ -18,9 +21,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
   tags: tags
   identity: {
     type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${identityId}': {}
-    }
+    userAssignedIdentities: toObject(identityIds, id => id, id => {})
   }
   properties: {
     environmentId: environmentId
@@ -36,7 +37,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       registries: [
         {
           server: registryServer
-          identity: identityId
+          identity: registryIdentityId
         }
       ]
     }

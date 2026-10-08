@@ -75,7 +75,7 @@ flowchart LR
         APIREG["App registration: PoC API (MI)<br/>resource only, no credential<br/>identifierUri api://api-client-id<br/>requestedAccessTokenVersion 2"]
         SCOPE["Exposed scope<br/>access_as_user"]
         ROLE["App role<br/>ApplicationAdmin"]
-        MISP["Managed identity service principal<br/>aagrmi-api-id"]
+        MISP["Managed identity service principal<br/>id-aagrmi-api"]
         PERMS["Application permissions<br/>User.Read.All<br/>User.ReadWrite.All<br/>GroupMember.Read.All"]
         DIRROLE["Optional directory role<br/>User Administrator"]
         GRAPHSP["Microsoft Graph service principal<br/>00000003-0000-0000-c000-000000000000"]
@@ -196,22 +196,41 @@ Open `http://localhost:4200`. The **About** tab explains the flow without signin
 
 ## 4. Deploy to Azure
 
-Both apps run on Azure Container Apps (consumption plan, scale to zero), so an idle deployment costs
-only the Basic container registry. Defined in [infra/azure/main.bicep](infra/azure/main.bicep).
+Both apps run on a shared Azure Container Apps environment (consumption plan, scale to zero) in
+**northcentralus**. The deployment reuses existing shared resources and only adds this
+implementation's identities and container apps. Defined in [infra/azure/main.bicep](infra/azure/main.bicep).
+
+Shared resources (must already exist, referenced only):
+
+| Resource group | Resource | Notes |
+| --- | --- | --- |
+| `rg-platform` | `acccrshared` container registry | images are built in the registry with `az acr build` as `aagrmi-api` / `aagrmi-spa`, no local Docker needed |
+| `rg-platform` | `id-shared-acrpull` user-assigned identity | holds only `AcrPull` on `acccrshared`; attached to every container app and used for image pulls |
+| `rg-apps` | `cae-shared` Container Apps environment | already sends container logs to `law-shared` |
+| `rg-apps` | `law-shared` Log Analytics workspace | not referenced by the Bicep; wired through the environment |
+
+Created in `rg-apps`:
 
 | Resource | Notes |
 | --- | --- |
-| `aagrmi-api` container app | .NET API, 0.25 vCPU / 0.5 GiB, 0&ndash;1 replicas |
-| `aagrmi-spa` container app | nginx serving the built SPA, same sizing |
-| User-assigned managed identities | one per app; both pull from the registry (`AcrPull`), the API's also calls Graph |
-| Container registry (Basic) | images are built in the registry with `az acr build`, no local Docker needed |
-| Log Analytics workspace | container logs, 30-day retention |
+| `id-aagrmi-api` user-assigned identity | the API's identity for Graph; no registry access |
+| `id-aagrmi-spa` user-assigned identity | the SPA's workload identity; no registry access |
+| `ca-aagrmi-api` container app | .NET API, 0.25 vCPU / 0.5 GiB, 0&ndash;1 replicas; identities `id-aagrmi-api` + `id-shared-acrpull` |
+| `ca-aagrmi-spa` container app | nginx serving the built SPA, same sizing; identities `id-aagrmi-spa` + `id-shared-acrpull` |
+
+The per-app identities are user-assigned and live in `rg-apps` rather than being system-assigned, so
+their ids, Graph app-role assignments and directory role survive deleting or replacing a container
+app. Registry access stays on the one narrowly scoped `id-shared-acrpull`.
+
+The deploying account needs Contributor on `rg-apps`, permission to run `az acr build` on
+`acccrshared`, and Managed Identity Operator on `id-shared-acrpull` (to attach it to the apps).
+No role assignments are created.
 
 Run step 1 first in the same cloud and tenant, then:
 
 ```powershell
 cd mi-imp/infra/azure
-./deploy.ps1                                  # defaults: rg-aagr-mi, eastus2
+./deploy.ps1                                  # defaults: rg-apps / rg-platform, northcentralus, prefix aagrmi
 ```
 
 Then run the `setup-entra.ps1 -ManagedIdentityResourceId ...` command the script prints. It registers
@@ -229,19 +248,23 @@ Privileged Role Administrator or Global Administrator):
   behind a directory role (such as `mobilePhone`).
 - Managed identity tokens are cached for up to 24 hours; restart the API revision after changing grants.
 
-Sizing, region and replica count are parameters (`-Location`, `-ResourceGroup`, `-ContainerCpu`,
-`-ContainerMemory`, `-MaxReplicas`, `-AcrSku`). For Azure Government, switch the CLI cloud and
-re-run both steps there; the authority and Graph endpoint follow the cloud:
+Sizing, replica count and the shared resource names are parameters (`-ContainerCpu`,
+`-ContainerMemory`, `-MaxReplicas`, `-NamePrefix`, `-ResourceGroup`, `-ContainerAppsEnvironment`,
+`-PlatformResourceGroup`, `-ContainerRegistry`, `-AcrPullIdentity`). `-Location` must match the
+environment's region; the script checks it. For Azure Government, switch the CLI cloud, point the
+script at that cloud's shared resources and re-run both steps there; the authority and Graph endpoint
+follow the cloud:
 
 ```powershell
 az cloud set --name AzureUSGovernment; az login
-./deploy.ps1 -Location usgovvirginia -ResourceGroup rg-aagr-mi-gov
+./deploy.ps1 -Location usgovvirginia -ResourceGroup rg-apps-gov -PlatformResourceGroup rg-platform-gov `
+    -ContainerRegistry <gov-registry> -ContainerAppsEnvironment <gov-environment>
 ```
 
 - The first request after the apps scale to zero takes several seconds while a replica starts.
-- Container Apps occasionally rejects new environments in a busy region
-  (`ManagedEnvironmentCapacityHeavyUsageError`). The script stops on it; redeploy to another region
-  with a new resource group.
+- Removing the deployment means deleting `ca-aagrmi-api`, `ca-aagrmi-spa`, `id-aagrmi-api` and
+  `id-aagrmi-spa` from `rg-apps` (and the `aagrmi-api` / `aagrmi-spa` repositories if wanted) &mdash; never the
+  resource groups, which hold other apps.
 
 ## Configuration reference
 

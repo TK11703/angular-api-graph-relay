@@ -25,7 +25,7 @@
     ./setup-entra.ps1 -AssignAdminRoleToCurrentUser -ApplyLocalConfig
 
 .EXAMPLE
-    ./setup-entra.ps1 -ConfigureFederatedCredential -ManagedIdentityResourceId /subscriptions/.../userAssignedIdentities/poc-api
+    ./setup-entra.ps1 -ConfigureFederatedCredential -ManagedIdentityResourceId /subscriptions/.../resourceGroups/rg-apps/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-aagrobo-api
 #>
 [CmdletBinding()]
 param(

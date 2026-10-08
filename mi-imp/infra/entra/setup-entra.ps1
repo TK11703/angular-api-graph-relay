@@ -28,7 +28,7 @@
     ./setup-entra.ps1 -AssignAdminRoleToCurrentUser -ApplyLocalConfig
 
 .EXAMPLE
-    ./setup-entra.ps1 -ManagedIdentityResourceId /subscriptions/.../userAssignedIdentities/aagrmi-api-id
+    ./setup-entra.ps1 -ManagedIdentityResourceId /subscriptions/.../resourceGroups/rg-apps/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-aagrmi-api
 #>
 [CmdletBinding()]
 param(

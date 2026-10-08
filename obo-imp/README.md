@@ -197,22 +197,41 @@ account holds the `ApplicationAdmin` role, an **Edit** action appears on each us
 
 ## 4. Deploy to Azure
 
-Both apps run on Azure Container Apps (consumption plan, scale to zero), so an idle deployment costs
-only the Basic container registry. Defined in [infra/azure/main.bicep](infra/azure/main.bicep).
+Both apps run on a shared Azure Container Apps environment (consumption plan, scale to zero) in
+**northcentralus**. The deployment reuses existing shared resources and only adds this
+implementation's identities and container apps. Defined in [infra/azure/main.bicep](infra/azure/main.bicep).
+
+Shared resources (must already exist, referenced only):
+
+| Resource group | Resource | Notes |
+| --- | --- | --- |
+| `rg-platform` | `acccrshared` container registry | images are built in the registry with `az acr build` as `aagrobo-api` / `aagrobo-spa`, no local Docker needed |
+| `rg-platform` | `id-shared-acrpull` user-assigned identity | holds only `AcrPull` on `acccrshared`; attached to every container app and used for image pulls |
+| `rg-apps` | `cae-shared` Container Apps environment | already sends container logs to `law-shared` |
+| `rg-apps` | `law-shared` Log Analytics workspace | not referenced by the Bicep; wired through the environment |
+
+Created in `rg-apps`:
 
 | Resource | Notes |
 | --- | --- |
-| `aagr-api` container app | .NET API, 0.25 vCPU / 0.5 GiB, 0&ndash;1 replicas |
-| `aagr-spa` container app | nginx serving the built SPA, same sizing |
-| User-assigned managed identities | one per app; both pull from the registry (`AcrPull`), the API's also replaces the client secret for OBO |
-| Container registry (Basic) | images are built in the registry with `az acr build`, no local Docker needed |
-| Log Analytics workspace | container logs, 30-day retention |
+| `id-aagrobo-api` user-assigned identity | federated credential on the API app registration, replaces the client secret for OBO; no registry access |
+| `id-aagrobo-spa` user-assigned identity | the SPA's workload identity; no registry access |
+| `ca-aagrobo-api` container app | .NET API, 0.25 vCPU / 0.5 GiB, 0&ndash;1 replicas; identities `id-aagrobo-api` + `id-shared-acrpull` |
+| `ca-aagrobo-spa` container app | nginx serving the built SPA, same sizing; identities `id-aagrobo-spa` + `id-shared-acrpull` |
+
+The per-app identities are user-assigned and live in `rg-apps` rather than being system-assigned, so
+their ids &mdash; and the federated credential that trusts `id-aagrobo-api` &mdash; survive deleting
+or replacing a container app. Registry access stays on the one narrowly scoped `id-shared-acrpull`.
+
+The deploying account needs Contributor on `rg-apps`, permission to run `az acr build` on
+`acccrshared`, and Managed Identity Operator on `id-shared-acrpull` (to attach it to the apps).
+No role assignments are created.
 
 Run step 1 first in the same cloud and tenant, then:
 
 ```powershell
 cd obo-imp/infra/azure
-./deploy.ps1                                  # defaults: rg-aagr, eastus2
+./deploy.ps1                                  # defaults: rg-apps / rg-platform, northcentralus, prefix aagrobo
 ```
 
 The script deploys the infrastructure, builds both images, builds the SPA against the deployed URLs
@@ -221,19 +240,23 @@ run the `setup-entra.ps1` command it prints at the end: it registers the API's m
 federated credential and adds the SPA URL as a redirect URI. Re-running `deploy.ps1` later just ships
 new images.
 
-Sizing, region and replica count are parameters (`-Location`, `-ResourceGroup`, `-ContainerCpu`,
-`-ContainerMemory`, `-MaxReplicas`, `-AcrSku`). For Azure Government, switch the CLI cloud and
-re-run both steps there; the authority, Graph endpoint and token-exchange audience follow the cloud:
+Sizing, replica count and the shared resource names are parameters (`-ContainerCpu`,
+`-ContainerMemory`, `-MaxReplicas`, `-NamePrefix`, `-ResourceGroup`, `-ContainerAppsEnvironment`,
+`-PlatformResourceGroup`, `-ContainerRegistry`, `-AcrPullIdentity`). `-Location` must match the
+environment's region; the script checks it. For Azure Government, switch the CLI cloud, point the
+script at that cloud's shared resources and re-run both steps there; the authority, Graph endpoint
+and token-exchange audience follow the cloud:
 
 ```powershell
 az cloud set --name AzureUSGovernment; az login
-./deploy.ps1 -Location usgovvirginia -ResourceGroup rg-aagr-gov
+./deploy.ps1 -Location usgovvirginia -ResourceGroup rg-apps-gov -PlatformResourceGroup rg-platform-gov `
+    -ContainerRegistry <gov-registry> -ContainerAppsEnvironment <gov-environment>
 ```
 
 - The first request after the apps scale to zero takes several seconds while a replica starts.
-- Container Apps occasionally rejects new environments in a busy region
-  (`ManagedEnvironmentCapacityHeavyUsageError`). The script stops on it; redeploy to another region
-  with a new resource group.
+- Removing the deployment means deleting `ca-aagrobo-api`, `ca-aagrobo-spa`, `id-aagrobo-api` and
+  `id-aagrobo-spa` from `rg-apps` (and the `aagrobo-api` / `aagrobo-spa` repositories if wanted) &mdash; never the
+  resource groups, which hold other apps.
 - Re-running `setup-entra.ps1` resets the API client secret; keep `-ApplyLocalConfig` so local
   development picks up the new one.
 
@@ -271,7 +294,7 @@ first, then register it:
 
 ```powershell
 ./setup-entra.ps1 -ConfigureFederatedCredential `
-  -ManagedIdentityResourceId /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<name>
+  -ManagedIdentityResourceId /subscriptions/<sub>/resourceGroups/rg-apps/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-aagrobo-api
 ```
 
 The script resolves the identity's principal id (the federation subject) and client id, picks the

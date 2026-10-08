@@ -6,8 +6,11 @@ Entra ID and receives a token **only for the API**; the API decides what the cal
 to Graph.
 
 The repo holds two self-contained implementations that differ in whose identity the API presents to
-Graph. Each has its own SPA, API, Entra app registrations and Azure deployment, so they can run side
-by side.
+Graph. Each has its own SPA, API, Entra app registrations and container apps, so they can run side
+by side. Both deploy to the same shared Azure resources in northcentralus: the `cae-shared`
+Container Apps environment (logging to `law-shared`) in `rg-apps`, and the `acccrshared` registry
+with the `id-shared-acrpull` pull identity in `rg-platform`. Each implementation adds only its own
+user-assigned identities (`id-aagrobo-*` / `id-aagrmi-*`) and container apps in `rg-apps`.
 
 ```mermaid
 flowchart LR

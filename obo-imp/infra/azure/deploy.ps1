@@ -1,12 +1,17 @@
 <#
 .SYNOPSIS
-    Provisions the Azure resources with Bicep, builds both apps and deploys them.
+    Deploys both apps onto the shared Container Apps environment with Bicep.
 
 .DESCRIPTION
-    1. Deploys main.bicep without images (registry, identities, Container Apps environment).
-    2. Builds the API image in ACR (no local Docker needed).
+    Uses existing shared resources and creates only this implementation's identities and container apps:
+      rg-platform : container registry (acccrshared), ACR-pull identity (id-shared-acrpull)
+      rg-apps     : Container Apps environment (cae-shared) and its Log Analytics workspace (law-shared)
+
+    1. Deploys main.bicep without images (user-assigned identities id-<prefix>-api / id-<prefix>-spa in rg-apps).
+    2. Builds the API image in the shared registry (no local Docker needed).
     3. Builds the SPA against the deployed URLs and ships it as an nginx image.
     4. Deploys main.bicep again with both images, which creates/updates the container apps.
+       Every app pulls with id-shared-acrpull, so the per-app identities need no registry access.
 
     Run obo-imp/infra/entra/setup-entra.ps1 in the same cloud and tenant first; this script reads
     obo-imp/infra/entra/entra-output.json. The cloud is whatever `az cloud set` points at.
@@ -19,18 +24,21 @@
 
 .EXAMPLE
     az cloud set --name AzureUSGovernment; az login
-    ./deploy.ps1 -Location usgovvirginia -ResourceGroup rg-aagr-gov
+    ./deploy.ps1 -Location usgovvirginia -ResourceGroup rg-apps-gov -PlatformResourceGroup rg-platform-gov `
+        -ContainerRegistry <gov-registry> -ContainerAppsEnvironment <gov-environment>
 #>
 [CmdletBinding()]
 param(
-    [string] $ResourceGroup = 'rg-aagr',
-    [string] $Location = 'eastus2',
-    [string] $NamePrefix = 'aagr',
+    [string] $ResourceGroup = 'rg-apps',
+    [string] $Location = 'northcentralus',
+    [string] $NamePrefix = 'aagrobo',
+    [string] $ContainerAppsEnvironment = 'cae-shared',
+    [string] $PlatformResourceGroup = 'rg-platform',
+    [string] $ContainerRegistry = 'acccrshared',
+    [string] $AcrPullIdentity = 'id-shared-acrpull',
     [string] $ContainerCpu = '0.25',
     [string] $ContainerMemory = '0.5Gi',
     [int] $MaxReplicas = 1,
-    [ValidateSet('Basic', 'Standard', 'Premium')]
-    [string] $AcrSku = 'Basic',
     [string] $EntraOutputFile = (Join-Path $PSScriptRoot '../entra/entra-output.json')
 )
 
@@ -46,7 +54,7 @@ function Invoke-Native {
     if ($LASTEXITCODE -ne 0) { throw "$FilePath $($Arguments -join ' ') failed with exit code $LASTEXITCODE" }
 }
 
-# ARM lookups of a newly created registry intermittently return ResourceNotFound, so builds are retried.
+# ARM lookups of the registry intermittently return ResourceNotFound, so builds are retried.
 function Invoke-AcrBuild {
     param([Parameter(Mandatory)][string] $Registry, [Parameter(Mandatory)][string] $Image, [Parameter(Mandatory)][string] $Context)
     $maxAttempts = 3
@@ -142,6 +150,10 @@ function Deploy-Infrastructure {
     $parameters = @(
         "namePrefix=$NamePrefix"
         "location=$Location"
+        "containerAppsEnvironmentName=$ContainerAppsEnvironment"
+        "platformResourceGroupName=$PlatformResourceGroup"
+        "containerRegistryName=$ContainerRegistry"
+        "acrPullIdentityName=$AcrPullIdentity"
         "entraTenantId=$($entra.tenantId)"
         "apiClientId=$($entra.apiClientId)"
         "authorityHost=$($entra.authorityHost)"
@@ -149,7 +161,6 @@ function Deploy-Infrastructure {
         "containerCpu=$ContainerCpu"
         "containerMemory=$ContainerMemory"
         "maxReplicas=$MaxReplicas"
-        "acrSku=$AcrSku"
         "apiImage=$ApiImage"
         "spaImage=$SpaImage"
     )
@@ -192,20 +203,31 @@ if ($entra.tenantId -ne $account.tenantId) {
     Write-Warning "Subscription tenant $($account.tenantId) differs from the app registration tenant $($entra.tenantId)."
 }
 
-Write-Host "==> Resource group $ResourceGroup ($Location)" -ForegroundColor Cyan
-Invoke-Native az @('group', 'create', '--name', $ResourceGroup, '--location', $Location, '--output', 'none')
+Write-Host '==> Checking shared resources' -ForegroundColor Cyan
+$envLocation = Invoke-AzJson -Arguments @(
+    'resource', 'show', '--resource-group', $ResourceGroup, '--name', $ContainerAppsEnvironment,
+    '--resource-type', 'Microsoft.App/managedEnvironments', '--query', 'location')
+if (($envLocation -replace '\s', '').ToLower() -ne $Location.ToLower()) {
+    throw "Container Apps environment $ContainerAppsEnvironment is in '$envLocation', not '$Location'. Pass -Location to match it."
+}
+$acrLoginServer = Invoke-AzJson -Arguments @('acr', 'show', '--resource-group', $PlatformResourceGroup, '--name', $ContainerRegistry, '--query', 'loginServer')
+$null = Invoke-AzJson -Arguments @('identity', 'show', '--resource-group', $PlatformResourceGroup, '--name', $AcrPullIdentity, '--query', 'id')
+Write-Host "  environment : $ResourceGroup/$ContainerAppsEnvironment ($Location)"
+Write-Host "  registry    : $acrLoginServer (pull identity $PlatformResourceGroup/$AcrPullIdentity)"
 
-Write-Host '==> Deploying shared infrastructure' -ForegroundColor Cyan
+Write-Host '==> Deploying app identities' -ForegroundColor Cyan
 $infra = Deploy-Infrastructure
-Write-Host "  registry : $($infra.acrLoginServer)"
-Write-Host "  api url  : $($infra.apiUrl)"
-Write-Host "  spa url  : $($infra.spaUrl)"
+Write-Host "  api identity : $($infra.apiIdentityResourceId)"
+Write-Host "  api url      : $($infra.apiUrl)"
+Write-Host "  spa url      : $($infra.spaUrl)"
 
 $tag = Get-Date -Format 'yyyyMMddHHmmss'
-$apiImage = "$($infra.acrLoginServer)/poc-api:$tag"
+# Repositories are prefixed because the registry is shared.
+$apiRepo = "$NamePrefix-api:$tag"
+$apiImage = "$($infra.acrLoginServer)/$apiRepo"
 
 Write-Host "==> Building API image $apiImage" -ForegroundColor Cyan
-Invoke-AcrBuild -Registry $infra.acrName -Image "poc-api:$tag" -Context $ApiDir
+Invoke-AcrBuild -Registry $infra.acrName -Image $apiRepo -Context $ApiDir
 
 Write-Host '==> Building SPA' -ForegroundColor Cyan
 $environmentDir = Join-Path $WebDir 'src/environments'
@@ -240,9 +262,10 @@ finally {
     Pop-Location
 }
 
-$spaImage = "$($infra.acrLoginServer)/poc-web:$tag"
+$spaRepo = "$NamePrefix-spa:$tag"
+$spaImage = "$($infra.acrLoginServer)/$spaRepo"
 Write-Host "==> Building SPA image $spaImage" -ForegroundColor Cyan
-Invoke-AcrBuild -Registry $infra.acrName -Image "poc-web:$tag" -Context $WebDir
+Invoke-AcrBuild -Registry $infra.acrName -Image $spaRepo -Context $WebDir
 
 Write-Host '==> Deploying container apps' -ForegroundColor Cyan
 $infra = Deploy-Infrastructure -ApiImage $apiImage -SpaImage $spaImage
