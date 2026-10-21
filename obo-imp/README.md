@@ -138,10 +138,25 @@ Query and route parameters are bound to `[AsParameters]` models in
 `builder.Services.AddValidation()`. Failures return `400` with `ValidationProblemDetails`
 before the endpoint body runs, which also keeps unvetted input out of the Graph `$search` expression.
 
+## Prerequisites
+
+- PowerShell and Azure CLI for the Entra and deployment scripts.
+- .NET 10 SDK for the API and Node.js/npm compatible with Angular 21 for the SPA.
+- An Entra tenant where you can create the app registrations. Admin consent for the requested
+  Microsoft Graph delegated permissions requires Privileged Role Administrator or Global
+  Administrator.
+- For Azure deployment, the shared resources in the tables below must already exist. `rg-apps`
+  and `rg-platform` must be in the same subscription; select that subscription with
+  `az account set --subscription <subscription-id>` before deploying. The script does not create
+  the shared registry, pull identity, Container Apps environment, or Log Analytics workspace.
+- No local Docker installation is needed; the deployment builds images with `az acr build`.
+
 ## 1. Create the Entra ID app registrations
 
-Requires **Application Administrator** to create the apps, and **Privileged Role Administrator**
-(or Global Administrator) to grant admin consent.
+Creating and configuring the app registrations requires **Application Administrator** (or
+equivalent app-registration ownership). Granting admin consent for the Graph delegated permissions
+requires **Privileged Role Administrator** or **Global Administrator**. The script reports consent
+failures if that grant cannot be completed.
 
 ```powershell
 az login --tenant <your-tenant-id>
@@ -214,7 +229,7 @@ Created in `rg-apps`:
 
 | Resource | Notes |
 | --- | --- |
-| `id-aagrobo-api` user-assigned identity | federated credential on the API app registration, replaces the client secret for OBO; no registry access |
+| `id-aagrobo-api` user-assigned identity | used as the API's federated credential for OBO after the Entra follow-up step; no registry access |
 | `id-aagrobo-spa` user-assigned identity | the SPA's workload identity; no registry access |
 | `ca-aagrobo-api` container app | .NET API, 0.25 vCPU / 0.5 GiB, 0&ndash;1 replicas; identities `id-aagrobo-api` + `id-shared-acrpull` |
 | `ca-aagrobo-spa` container app | nginx serving the built SPA, same sizing; identities `id-aagrobo-spa` + `id-shared-acrpull` |
@@ -223,28 +238,94 @@ The per-app identities are user-assigned and live in `rg-apps` rather than being
 their ids &mdash; and the federated credential that trusts `id-aagrobo-api` &mdash; survive deleting
 or replacing a container app. Registry access stays on the one narrowly scoped `id-shared-acrpull`.
 
-The deploying account needs Contributor on `rg-apps`, permission to run `az acr build` on
-`acccrshared`, and Managed Identity Operator on `id-shared-acrpull` (to attach it to the apps).
-No role assignments are created.
+The deployment account needs:
 
-Run step 1 first in the same cloud and tenant, then:
+- Contributor on `rg-apps` to create the per-app identities and Container Apps.
+- Read access to the shared resources it references, plus permission to queue `az acr build` runs
+  and push the resulting images to `acccrshared`. With standard registry RBAC, this typically means
+  `AcrPush` plus `Microsoft.ContainerRegistry/registries/scheduleRun/action`; use equivalent
+  permissions if the registry uses a different RBAC mode.
+- Managed Identity Operator on `id-shared-acrpull` so the deployment can attach it to the apps.
+
+No role assignments are created by this deployment. It does not need Contributor on `rg-platform`.
+
+### 4.1 Select the Azure cloud and subscription
+
+Use the same Entra tenant and cloud as step 1, and select the subscription containing both resource
+groups. For Azure Government, select the cloud before signing in:
+
+```powershell
+az cloud set --name AzureUSGovernment
+az login --tenant <your-tenant-id>
+az account set --subscription <subscription-id>
+```
+
+For Azure public cloud, omit the `az cloud set` command. The deploy script does not create the
+shared resources listed above; confirm they exist in the selected subscription before continuing.
+
+### 4.2 Deploy the Container Apps and build the images
 
 ```powershell
 cd obo-imp/infra/azure
-./deploy.ps1                                  # defaults: rg-apps / rg-platform, northcentralus, prefix aagrobo
+./deploy.ps1
 ```
 
-The script deploys the infrastructure, builds both images, builds the SPA against the deployed URLs
-and deploys again with the images, printing per-resource status as it goes. On the **first** deploy,
-run the `setup-entra.ps1` command it prints at the end: it registers the API's managed identity as a
-federated credential and adds the SPA URL as a redirect URI. Re-running `deploy.ps1` later just ships
-new images.
+The script deploys the API and SPA identities first, builds both images in ACR, then deploys the
+container apps. It prints the API and SPA URLs and a follow-up Entra command at the end. Defaults
+are `rg-apps` / `rg-platform`, `northcentralus`, and the `aagrobo` name prefix.
+
+The account running **`deploy.ps1`** needs these Azure RBAC permissions:
+
+| Scope | Permission | Why it is needed |
+| --- | --- | --- |
+| `rg-apps` | Contributor | Create the two user-assigned identities and the Container Apps. |
+| Shared Container Apps environment and referenced shared resources | Read access | Look up the existing environment, registry, and pull identity. Contributor on `rg-apps` covers the environment; the resources in `rg-platform` need separate read access. |
+| `id-shared-acrpull` | Managed Identity Operator | Attach the shared image-pull identity to both apps. |
+| `acccrshared` | Permission to queue ACR builds and push images | Build the API and SPA images. With standard registry RBAC, this is typically `AcrPush` plus `Microsoft.ContainerRegistry/registries/scheduleRun/action`; use equivalent permissions for the registry's RBAC mode. |
+
+These are permissions for the deploying account, not assignments made by the script. No Contributor
+access to all of `rg-platform` is required.
+
+### 4.3 Register the API identity for on-behalf-of token exchange
+
+After the deployment, run the **`setup-entra.ps1` command printed by `deploy.ps1`**. It includes the
+API identity's resource ID and the deployed SPA URL; run it as printed so the redirect URI matches
+the deployed app. From the repository root, the equivalent command shape is:
+
+```powershell
+cd obo-imp/infra/entra
+./setup-entra.ps1 -ApplyLocalConfig -ConfigureFederatedCredential `
+    -ManagedIdentityResourceId <api-identity-resource-id> `
+    -AdditionalSpaRedirectUris <deployed-spa-url>
+```
+
+The account running **`setup-entra.ps1`** needs:
+
+| Entra/Azure scope | Role or permission | Why it is needed |
+| --- | --- | --- |
+| API identity in Azure | Read the user-assigned identity | Resolve its principal ID and client ID for the federated credential. |
+| **PoC API** app registration | Application Administrator, or an owner with permission to manage credentials | Create the federated identity credential on the API registration. |
+| **PoC SPA** app registration | Application Administrator, or an owner with permission to update the registration | Add the deployed SPA URL as a redirect URI. |
+
+This step does **not** grant Microsoft Graph permissions; those delegated permissions were consented
+in step 1. `-ApplyLocalConfig` also refreshes the local SPA configuration and resets the API client
+secret, storing its new value in local user-secrets. Azure uses the federated credential, not this
+secret. The Entra command must succeed before the deployed API can exchange tokens and call Graph.
+
+### 4.4 Verify the deployment
+
+Open the printed SPA URL, sign in, then try the profile or user-search flow. Delegated Graph access
+is still subject to the signed-in user's directory permissions. Editing additionally requires the
+user's `ApplicationAdmin` app role (assigned in step 1) and any applicable Entra directory role, such
+as User Administrator. Re-running `deploy.ps1` rebuilds and deploys the images but does **not** repeat
+the Entra federation and redirect-URI setup; rerun the printed `setup-entra.ps1` command if that
+configuration needs to be restored.
 
 Sizing, replica count and the shared resource names are parameters (`-ContainerCpu`,
 `-ContainerMemory`, `-MaxReplicas`, `-NamePrefix`, `-ResourceGroup`, `-ContainerAppsEnvironment`,
 `-PlatformResourceGroup`, `-ContainerRegistry`, `-AcrPullIdentity`). `-Location` must match the
 environment's region; the script checks it. For Azure Government, switch the CLI cloud, point the
-script at that cloud's shared resources and re-run both steps there; the authority, Graph endpoint
+script at that cloud's shared resources and repeat steps 4.1–4.4 there; the authority, Graph endpoint
 and token-exchange audience follow the cloud:
 
 ```powershell
@@ -257,7 +338,7 @@ az cloud set --name AzureUSGovernment; az login
 - Removing the deployment means deleting `ca-aagrobo-api`, `ca-aagrobo-spa`, `id-aagrobo-api` and
   `id-aagrobo-spa` from `rg-apps` (and the `aagrobo-api` / `aagrobo-spa` repositories if wanted) &mdash; never the
   resource groups, which hold other apps.
-- Re-running `setup-entra.ps1` resets the API client secret; keep `-ApplyLocalConfig` so local
+- Re-running `setup-entra.ps1` resets the API client secret; include `-ApplyLocalConfig` so local
   development picks up the new one.
 
 ## Configuration reference
@@ -286,11 +367,16 @@ merge with (rather than replace) the per-environment entry and leave a stale key
 | Environment | Credential | Where it comes from |
 | --- | --- | --- |
 | Local | client secret | `dotnet user-secrets`, written by `setup-entra.ps1 -ApplyLocalConfig` |
-| Deployed | managed identity | `appsettings.Production.json`, no secret anywhere |
+| Deployed | user-assigned managed identity | Container Apps settings supplied by `main.bicep`, no secret anywhere |
 
 The deployed path uses a federated identity credential: the managed identity is registered on the app
-registration, so it can act as the app without a secret or certificate to rotate. Create the identity
-first, then register it:
+registration, so it can act as the app without a secret or certificate to rotate. `deploy.ps1` creates
+the user-assigned identity and `main.bicep` configures the API to use its client id and the active
+cloud's token-exchange audience. After the first deploy, run the Entra follow-up command printed by
+the script to create the federated credential; do not copy the printed settings into
+`appsettings.Production.json`.
+
+To configure federation separately, create the identity first, then run:
 
 ```powershell
 ./setup-entra.ps1 -ConfigureFederatedCredential `
@@ -298,9 +384,10 @@ first, then register it:
 ```
 
 The script resolves the identity's principal id (the federation subject) and client id, picks the
-token-exchange audience for the active cloud, and prints the settings to apply to the deployed API.
-Put the client id in `appsettings.Production.json`; for a **system-assigned** identity, pass
-`-ManagedIdentityPrincipalId` instead and delete `ManagedIdentityClientId` from that file.
+token-exchange audience for the active cloud, and prints the resulting configuration for reference.
+The checked-in Container Apps deployment uses a user-assigned identity. A system-assigned identity
+would require changing the Bicep identity configuration as well; passing its principal id to this
+script alone does not switch the deployed app to a system-assigned identity.
 
 ### Sovereign clouds
 

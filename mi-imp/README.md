@@ -142,6 +142,19 @@ Query and route parameters are bound to `[AsParameters]` models in
 `builder.Services.AddValidation()`. Failures return `400` with `ValidationProblemDetails`
 before the endpoint body runs, which also keeps unvetted input out of the Graph `$search` expression.
 
+## Prerequisites
+
+- PowerShell and Azure CLI for the Entra and deployment scripts.
+- .NET 10 SDK for the API and Node.js/npm compatible with Angular 21 for the SPA.
+- For local sign-in, an Entra tenant where you can create the app registrations. The API's local
+  Graph calls use the signed-in Azure CLI account; that account must have the directory access
+  needed for the Graph operation being tested.
+- For Azure deployment, the shared resources in the tables below must already exist. `rg-apps`
+  and `rg-platform` must be in the same subscription; select that subscription with
+  `az account set --subscription <subscription-id>` before deploying. The script does not create
+  the shared registry, pull identity, Container Apps environment, or Log Analytics workspace.
+- No local Docker installation is needed; the deployment builds images with `az acr build`.
+
 ## 1. Create the Entra ID app registrations
 
 Requires **Application Administrator** to create the apps.
@@ -163,9 +176,23 @@ What the script does:
 5. `-ApplyLocalConfig` writes the ids into `src/poc-web/src/environments/environment.ts` and stores
    the tenant id, client id and Graph endpoint in `dotnet user-secrets` (there is no secret to store).
 
-Ids are also saved to `infra/entra/entra-output.json` (git-ignored). If you skip `-ApplyLocalConfig`,
-copy [environment.sample.ts](src/poc-web/src/environments/environment.sample.ts) to `environment.ts`
-and fill in the placeholders &mdash; the SPA will not build without it.
+Ids are also saved to `infra/entra/entra-output.json` (git-ignored). `-ApplyLocalConfig` configures
+both the SPA and the API's `dotnet user-secrets`; it is the recommended local setup. If you omit it,
+copy [environment.sample.ts](src/poc-web/src/environments/environment.sample.ts) to
+`environment.ts` and fill in its placeholders, then set the API user-secrets from
+`entra-output.json` (the authority host, tenant id, API client id, and Graph base URL):
+
+```powershell
+cd mi-imp/src/Poc.Api
+dotnet user-secrets init
+dotnet user-secrets set "AzureAd:Instance" "<authorityHost>"
+dotnet user-secrets set "AzureAd:TenantId" "<tenantId>"
+dotnet user-secrets set "AzureAd:ClientId" "<apiClientId>"
+dotnet user-secrets set "MicrosoftGraph:BaseUrl" "<graphBaseUrl>"
+```
+
+Without both configurations, the SPA will not build and the API will not be configured for
+authentication.
 
 The managed identity does not exist until the first deploy, so its Graph permissions are granted in
 [step 4](#4-deploy-to-azure). Remove the app registrations with `./teardown-entra.ps1`.
@@ -181,8 +208,8 @@ dotnet run --launch-profile https
 Listens on `https://localhost:7182`. OpenAPI document at `/openapi/v1.json` in Development.
 
 There is no managed identity on a dev machine, so in `Development` the API uses `AzureCliCredential`
-and Graph sees **your** `az login` account (delegated, limited by your own directory rights). The
-app-only behaviour only exists once deployed.
+and Graph sees **your** `az login` account (delegated, limited by your own directory rights and the
+Graph access available to that account). The app-only behaviour only exists once deployed.
 
 ## 3. Run the SPA
 
@@ -222,20 +249,83 @@ The per-app identities are user-assigned and live in `rg-apps` rather than being
 their ids, Graph app-role assignments and directory role survive deleting or replacing a container
 app. Registry access stays on the one narrowly scoped `id-shared-acrpull`.
 
-The deploying account needs Contributor on `rg-apps`, permission to run `az acr build` on
-`acccrshared`, and Managed Identity Operator on `id-shared-acrpull` (to attach it to the apps).
-No role assignments are created.
+The deployment account needs:
 
-Run step 1 first in the same cloud and tenant, then:
+- Contributor on `rg-apps` to create the per-app identities and Container Apps.
+- Read access to the shared resources it references, plus permission to queue `az acr build` runs
+  and push the resulting images to `acccrshared`. With standard registry RBAC, this typically means
+  `AcrPush` plus `Microsoft.ContainerRegistry/registries/scheduleRun/action`; use equivalent
+  permissions if the registry uses a different RBAC mode.
+- Managed Identity Operator on `id-shared-acrpull` so the deployment can attach it to the apps.
+
+No role assignments are created by this deployment. It does not need Contributor on `rg-platform`.
+
+### 4.1 Select the Azure cloud and subscription
+
+Use the same Entra tenant and cloud as step 1, and select the subscription containing both resource
+groups. For Azure Government, select the cloud before signing in:
+
+```powershell
+az cloud set --name AzureUSGovernment
+az login --tenant <your-tenant-id>
+az account set --subscription <subscription-id>
+```
+
+For Azure public cloud, omit the `az cloud set` command. The deploy script does not create the
+shared resources listed above; confirm they exist in the selected subscription before continuing.
+
+### 4.2 Deploy the Container Apps and build the images
 
 ```powershell
 cd mi-imp/infra/azure
-./deploy.ps1                                  # defaults: rg-apps / rg-platform, northcentralus, prefix aagrmi
+./deploy.ps1
 ```
 
-Then run the `setup-entra.ps1 -ManagedIdentityResourceId ...` command the script prints. It registers
-the SPA URL and grants the identity these Microsoft Graph **application** permissions (needs
-Privileged Role Administrator or Global Administrator):
+The script deploys the API and SPA identities first, builds both images in ACR, then deploys the
+container apps. It prints the API and SPA URLs and a follow-up Entra command at the end. Defaults
+are `rg-apps` / `rg-platform`, `northcentralus`, and the `aagrmi` name prefix.
+
+The account running **`deploy.ps1`** needs these Azure RBAC permissions:
+
+| Scope | Permission | Why it is needed |
+| --- | --- | --- |
+| `rg-apps` | Contributor | Create the two user-assigned identities and the Container Apps. |
+| Shared Container Apps environment and referenced shared resources | Read access | Look up the existing environment, registry, and pull identity. Contributor on `rg-apps` covers the environment; the resources in `rg-platform` need separate read access. |
+| `id-shared-acrpull` | Managed Identity Operator | Attach the shared image-pull identity to both apps. |
+| `acccrshared` | Permission to queue ACR builds and push images | Build the API and SPA images. With standard registry RBAC, this is typically `AcrPush` plus `Microsoft.ContainerRegistry/registries/scheduleRun/action`; use equivalent permissions for the registry's RBAC mode. |
+
+These are permissions for the deploying account, not assignments made by the script. No Contributor
+access to all of `rg-platform` is required.
+
+### 4.3 Grant the API managed identity access to Microsoft Graph
+
+After the deployment, run the **`setup-entra.ps1` command printed by `deploy.ps1`**. It includes the
+API identity's resource ID and the deployed SPA URL; run it as printed so the redirect URI matches
+the deployed app. From the repository root, the equivalent command shape is:
+
+```powershell
+cd mi-imp/infra/entra
+./setup-entra.ps1 -ApplyLocalConfig `
+    -ManagedIdentityResourceId <api-identity-resource-id> `
+    -AdditionalSpaRedirectUris <deployed-spa-url>
+```
+
+The account running **`setup-entra.ps1`** needs:
+
+| Entra/Azure scope | Role or permission | Why it is needed |
+| --- | --- | --- |
+| **PoC API (MI)** and **PoC SPA (MI)** app registrations | Application Administrator, or an owner with permission to update the registrations | Update the SPA redirect URI and API registration. |
+| API identity in Azure | Read the user-assigned identity | Resolve its principal ID for the Graph grants. |
+| Entra tenant | Privileged Role Administrator or Global Administrator | Grant Microsoft Graph application permissions to the managed identity. |
+
+The last permission is required for the default Graph grants below. If the person running the
+command cannot grant them, ask a Privileged Role Administrator or Global Administrator to rerun the
+printed command. The script is idempotent; it skips grants that are already present. Add
+`-AssignUserAdministratorRoleToManagedIdentity` only when the API must edit properties Graph
+protects behind a directory role; assigning that directory role also requires Privileged Role
+Administrator or Global Administrator.
+
+The default Microsoft Graph **application** permissions granted to the API identity are:
 
 | Permission | Used by |
 | --- | --- |
@@ -244,16 +334,19 @@ Privileged Role Administrator or Global Administrator):
 | `User.ReadWrite.All` | `PATCH /api/users/{id}` |
 
 - Trim the list with `-ManagedIdentityGraphAppRoles`, e.g. drop `User.ReadWrite.All` for read-only.
-- Add `-AssignUserAdministratorRoleToManagedIdentity` if edits must reach properties Graph protects
-  behind a directory role (such as `mobilePhone`).
 - Managed identity tokens are cached for up to 24 hours; restart the API revision after changing grants.
+
+`-ApplyLocalConfig` also refreshes the local SPA configuration and API user-secrets. Once the Entra
+command succeeds, open the printed SPA URL and sign in to verify the deployment. A Graph `403` means
+the Graph application grant or (for protected edits) the optional directory role is missing; a
+failed token acquisition can also occur while newly granted permissions propagate.
 
 Sizing, replica count and the shared resource names are parameters (`-ContainerCpu`,
 `-ContainerMemory`, `-MaxReplicas`, `-NamePrefix`, `-ResourceGroup`, `-ContainerAppsEnvironment`,
 `-PlatformResourceGroup`, `-ContainerRegistry`, `-AcrPullIdentity`). `-Location` must match the
 environment's region; the script checks it. For Azure Government, switch the CLI cloud, point the
-script at that cloud's shared resources and re-run both steps there; the authority and Graph endpoint
-follow the cloud:
+script at that cloud's shared resources and repeat steps 4.1–4.3 there; the authority and Graph
+endpoint follow the cloud:
 
 ```powershell
 az cloud set --name AzureUSGovernment; az login
